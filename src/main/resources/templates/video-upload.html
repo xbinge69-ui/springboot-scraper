@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Direct Video Upload</title>
+    <style>
+        body { font-family: sans-serif; max-width: 820px; margin: 40px auto; padding: 0 1rem; }
+        h1 { margin-bottom: .3rem; }
+        p { color: #555; }
+        label { display: block; margin-top: .8rem; font-weight: 600; }
+        input, textarea { width: 100%; padding: .55rem; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        input[type="file"] { padding: 0.4rem; }
+        textarea { min-height: 110px; resize: vertical; }
+        button { margin-top: 1rem; background: #0b5cab; color: #fff; border: none; border-radius: 4px; padding: .7rem 1rem; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #094985; }
+        button:disabled { background: #888; cursor: not-allowed; }
+        pre { margin-top: 1rem; background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 1rem; overflow: auto; max-height: 400px; }
+        .hint { font-size: .85rem; color: #666; }
+        .error { color: #c00; margin-top: .7rem; }
+        .success { color: #090; margin-top: .7rem; }
+        .nav a { color: #0b5cab; text-decoration: none; margin-right: 1rem; }
+        .progress { display: none; margin-top: 1rem; }
+        .progress-bar { width: 100%; height: 20px; background: #eee; border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; background: #0b5cab; width: 0%; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+<div class="nav">
+    <a th:href="@{/video}">← Video Extractor</a>
+    <a th:href="@{/video/pipeline}">Scrape Pipeline</a>
+</div>
+
+<h1>Direct Video Upload</h1>
+<p>Upload a video file and metadata simultaneously.</p>
+<p class="hint"><strong>Note:</strong> Title is mandatory. Other fields are optional.</p>
+
+<form id="uploadForm">
+    <label for="videoFile">Video File (MP4) *</label>
+    <input id="videoFile" name="videoFile" type="file" accept="video/mp4" required/>
+
+    <label for="title">Title *</label>
+    <input id="title" name="title" type="text" required placeholder="e.g. Amateur Couple Session"/>
+
+    <label for="description">Description</label>
+    <textarea id="description" name="description" placeholder="Describe the video content..."></textarea>
+
+    <label for="tags">Tags (comma separated)</label>
+    <input id="tags" name="tags" type="text" placeholder="amateur,couple,bedroom"/>
+
+    <label for="category">Category</label>
+    <input id="category" name="category" type="text" value="Amateur"/>
+
+    <label for="unknownActressName">Unknown Actress Name</label>
+    <input id="unknownActressName" name="unknownActressName" type="text" value="Anonymous"/>
+
+    <label for="actressId">Actress ID (optional)</label>
+    <input id="actressId" name="actressId" type="text"/>
+
+    <button id="submitBtn" type="submit">Upload & Create Catalog Entry</button>
+</form>
+
+<div class="progress" id="progress">
+    <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <p id="progressText">Uploading...</p>
+</div>
+
+<div id="error" class="error"></div>
+<div id="success" class="success"></div>
+<pre id="output">No result yet.</pre>
+
+<script>
+    const form = document.getElementById('uploadForm');
+    const output = document.getElementById('output');
+    const error = document.getElementById('error');
+    const success = document.getElementById('success');
+    const progress = document.getElementById('progress');
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const submitBtn = document.getElementById('submitBtn');
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        error.textContent = '';
+        success.textContent = '';
+        output.textContent = 'Processing...';
+        progress.style.display = 'block';
+        submitBtn.disabled = true;
+        progressFill.style.width = '0%';
+
+        const formData = new FormData();
+        formData.append('videoFile', form.videoFile.files[0]);
+        formData.append('title', form.title.value);
+        formData.append('description', form.description.value);
+        formData.append('category', form.category.value);
+        formData.append('tags', form.tags.value);
+        formData.append('unknownActressName', form.unknownActressName.value);
+        formData.append('actressId', form.actressId.value);
+
+        try {
+            progressFill.style.width = '30%';
+            progressText.textContent = 'Uploading file...';
+
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    progressFill.style.width = (30 + percentComplete * 0.4) + '%';
+                }
+            });
+
+            xhr.addEventListener('load', () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    progressFill.style.width = '100%';
+                    progressText.textContent = 'Complete!';
+                    const json = JSON.parse(xhr.responseText);
+                    success.textContent = 'Video ingested successfully! ID: ' + json.entry.id;
+                    output.textContent = JSON.stringify(json, null, 2);
+                    form.reset();
+                } else {
+                    const txt = xhr.responseText || ('HTTP ' + xhr.status);
+                    throw new Error(txt);
+                }
+                submitBtn.disabled = false;
+            });
+
+            xhr.addEventListener('error', () => {
+                throw new Error('Network error');
+            });
+
+            progressFill.style.width = '70%';
+            progressText.textContent = 'Processing server-side...';
+
+            xhr.open('POST', '/api/video/ingest-file');
+            xhr.send(formData);
+
+        } catch (err) {
+            error.textContent = err.message || String(err);
+            output.textContent = 'Failed.';
+            progress.style.display = 'none';
+            submitBtn.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>

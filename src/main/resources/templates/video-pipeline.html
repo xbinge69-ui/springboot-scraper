@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Video Pipeline</title>
+    <style>
+        body { font-family: sans-serif; max-width: 820px; margin: 40px auto; padding: 0 1rem; }
+        h1 { margin-bottom: .3rem; }
+        p { color: #555; }
+        label { display: block; margin-top: .8rem; font-weight: 600; }
+        input, textarea { width: 100%; padding: .55rem; border: 1px solid #ccc; border-radius: 4px; }
+        textarea { min-height: 110px; resize: vertical; }
+        button { margin-top: 1rem; background: #0b5cab; color: #fff; border: none; border-radius: 4px; padding: .7rem 1rem; cursor: pointer; }
+        button:hover { background: #094985; }
+        pre { margin-top: 1rem; background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 1rem; overflow: auto; }
+        .hint { font-size: .85rem; color: #666; }
+        .error { color: #c00; margin-top: .7rem; }
+        .nav a { color: #0b5cab; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="nav">
+    <a th:href="@{/video}">Back to extractor</a>
+    <a th:href="@{/video/upload}">Upload Video</a>
+</div>
+<h1>Video Ingestion Pipeline</h1>
+<p>Scrape first video, generate upload URLs, build JSON entry, and append to videos catalog.</p>
+<p class="hint">Only use this workflow for content you are authorized to process.</p>
+
+<form id="pipelineForm">
+    <label for="sourcePageUrl">Source page URL</label>
+    <input id="sourcePageUrl" name="sourcePageUrl" type="url" required placeholder="https://www.erome.com/a/xxxx"/>
+
+    <label for="title">Title (optional override)</label>
+    <input id="title" name="title" type="text"/>
+
+    <label for="description">Description</label>
+    <textarea id="description" name="description"></textarea>
+
+    <label for="tags">Tags (comma separated)</label>
+    <input id="tags" name="tags" type="text" placeholder="amateur,couple"/>
+
+    <label for="category">Category</label>
+    <input id="category" name="category" type="text" value="Amateur"/>
+
+    <label for="unknownActressName">Unknown actress name</label>
+    <input id="unknownActressName" name="unknownActressName" type="text" value="Anonymous"/>
+
+    <label for="actressId">Actress ID (optional)</label>
+    <input id="actressId" name="actressId" type="text"/>
+
+    <label for="views">Views</label>
+    <input id="views" name="views" type="number" min="0" value="0"/>
+
+    <button type="submit">Run Pipeline</button>
+</form>
+
+<div id="error" class="error"></div>
+<pre id="output">No result yet.</pre>
+
+<script>
+    const form = document.getElementById('pipelineForm');
+    const output = document.getElementById('output');
+    const error = document.getElementById('error');
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        error.textContent = '';
+        output.textContent = 'Processing...';
+
+        const payload = {
+            sourcePageUrl: form.sourcePageUrl.value,
+            title: form.title.value,
+            description: form.description.value,
+            tags: form.tags.value,
+            category: form.category.value,
+            unknownActressName: form.unknownActressName.value,
+            actressId: form.actressId.value,
+            views: form.views.value ? Number(form.views.value) : 0
+        };
+
+        try {
+            const res = await fetch('/api/video/pipeline', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || ('HTTP ' + res.status));
+            }
+
+            const json = await res.json();
+            output.textContent = JSON.stringify(json, null, 2);
+        } catch (err) {
+            error.textContent = err.message || String(err);
+            output.textContent = 'Failed.';
+        }
+    });
+</script>
+</body>
+</html>

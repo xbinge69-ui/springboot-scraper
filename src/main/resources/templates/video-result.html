@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title th:text="'Vidéos — ' + ${result.pageTitle()}">Vidéos</title>
+    <style>
+        body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 1rem; }
+        h1 { color: #333; word-break: break-all; }
+        .meta { color: #666; margin-bottom: 1.5rem; }
+        .back { display: inline-block; margin-bottom: 1rem; color: #0077cc; text-decoration: none; }
+        .badge { display: inline-block; background: #c00; color: #fff; padding: .15rem .5rem; border-radius: 3px; font-size: .8rem; vertical-align: middle; margin-left: .4rem; }
+        .video-block { margin-bottom: 2rem; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; }
+        .video-block video { width: 100%; display: block; max-height: 500px; background: #000; }
+        .video-url { padding: .6rem 1rem; background: #f9f9f9; font-size: .85rem; word-break: break-all; }
+        .video-url a { color: #0077cc; }
+        .copy-btn { float: right; padding: .2rem .6rem; font-size: .8rem; cursor: pointer; border: 1px solid #ccc; border-radius: 3px; background: #fff; }
+        .copy-btn:hover { background: #eee; }
+        .empty { color: #888; margin-top: 1rem; }
+        .first-label { font-weight: bold; color: #c00; margin: .5rem 1rem; display: block; font-size: .85rem; }
+    </style>
+</head>
+<body>
+    <a class="back" th:href="@{/video}">← Nouvelle extraction</a>
+
+    <h1>
+        <span th:text="${result.pageTitle()}">Titre</span>
+        <span class="badge" th:text="${result.site()}">Site</span>
+    </h1>
+
+    <p class="meta">
+        Source : <a th:href="${result.albumUrl()}" th:text="${result.albumUrl()}"
+                    target="_blank" rel="noopener noreferrer"></a><br/>
+        <strong th:text="${result.videoUrls().size()}">0</strong> vidéo(s) trouvée(s).
+    </p>
+
+    <div th:if="${result.videoUrls().empty}" class="empty">
+        Aucune vidéo trouvée. La page nécessite peut-être une authentification,
+        ou son contenu est chargé dynamiquement (JavaScript).
+    </div>
+
+    <div th:each="videoUrl, stat : ${result.videoUrls()}" class="video-block">
+        <span class="first-label" th:if="${stat.index == 0}">★ Première vidéo</span>
+
+        <!-- Video proxied through Spring Boot to bypass CDN hotlink protection -->
+        <video controls preload="metadata"
+             th:src="@{/video/stream(url=${videoUrl},referer=${result.albumUrl()})}">
+            Votre navigateur ne supporte pas la balise vidéo.
+        </video>
+
+        <div class="video-url">
+            <button class="copy-btn"
+                    th:attr="onclick='navigator.clipboard.writeText(\'' + ${videoUrl} + '\')'">
+                Copier l'URL directe
+            </button>
+            <span th:text="${videoUrl}"></span>
+        </div>
+    </div>
+</body>
+</html>

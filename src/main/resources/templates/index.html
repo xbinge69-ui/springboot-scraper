@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Web Scraper</title>
+    <style>
+        body { font-family: sans-serif; max-width: 700px; margin: 60px auto; padding: 0 1rem; }
+        h1 { color: #333; }
+        form { display: flex; gap: .5rem; flex-wrap: wrap; }
+        input[type=url] { flex: 1; padding: .6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; }
+        button { padding: .6rem 1.2rem; background: #0077cc; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #005fa3; }
+        .error { color: #c00; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Web Scraper</h1>
+    <p>Entrez une URL pour extraire tous les liens de la page. | <a th:href="@{/video}">Extracteur de vidéos →</a></p>
+
+    <form method="post" th:action="@{/scrape}">
+        <input type="url" name="url" placeholder="https://example.com" required/>
+        <button type="submit">Scraper</button>
+    </form>
+
+    <p class="error" th:if="${error}" th:text="${error}"></p>
+</body>
+</html>

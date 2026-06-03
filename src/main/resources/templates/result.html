@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title th:text="'Résultats — ' + ${pageTitle}">Résultats</title>
+    <style>
+        body { font-family: sans-serif; max-width: 900px; margin: 40px auto; padding: 0 1rem; }
+        h1 { color: #333; word-break: break-all; }
+        .meta { color: #666; margin-bottom: 1.5rem; }
+        .back { display: inline-block; margin-bottom: 1rem; color: #0077cc; text-decoration: none; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #eee; }
+        th { background: #f4f4f4; }
+        td a { color: #0077cc; word-break: break-all; }
+        td a:hover { text-decoration: underline; }
+        .empty { color: #888; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <a class="back" th:href="@{/}">← Nouvelle recherche</a>
+
+    <h1 th:text="${pageTitle}">Titre de la page</h1>
+    <p class="meta">
+        Source : <a th:href="${url}" th:text="${url}" target="_blank" rel="noopener noreferrer"></a><br/>
+        <strong th:text="${count}">0</strong> lien(s) trouvé(s).
+    </p>
+
+    <div th:if="${items.empty}" class="empty">Aucun lien trouvé sur cette page.</div>
+
+    <table th:if="${!items.empty}">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Texte</th>
+                <th>URL</th>
+                <th>Title attr</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr th:each="item, stat : ${items}">
+                <td th:text="${stat.index + 1}">1</td>
+                <td th:text="${item.title()}">texte</td>
+                <td><a th:href="${item.url()}" th:text="${item.url()}" target="_blank" rel="noopener noreferrer"></a></td>
+                <td th:text="${item.description()}"></td>
+            </tr>
+        </tbody>
+    </table>
+</body>
+</html>

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Extracteur de vidéos</title>
+    <style>
+        body { font-family: sans-serif; max-width: 700px; margin: 60px auto; padding: 0 1rem; }
+        h1 { color: #333; }
+        .nav { margin-bottom: 1.5rem; }
+        .nav a { color: #0077cc; text-decoration: none; margin-right: 1rem; }
+        form { display: flex; gap: .5rem; flex-wrap: wrap; }
+        input[type=url] { flex: 1; padding: .6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; }
+        button { padding: .6rem 1.2rem; background: #c00; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        button:hover { background: #a00; }
+        .error { color: #c00; margin-top: 1rem; }
+        .supported { color: #666; font-size: .85rem; margin-top: .75rem; }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a th:href="@{/}">← Scraper de liens</a>
+        <a th:href="@{/video/pipeline}">Pipeline JSON</a>
+        <a th:href="@{/video/upload}">Upload Video</a>
+    </div>
+
+    <h1>Extracteur de vidéos</h1>
+    <p>Entrez l'URL d'une page pour extraire les URLs des vidéos.</p>
+
+    <form method="post" th:action="@{/video/scrape}">
+        <input type="url" name="url" placeholder="https://example.com/page-with-video" required/>
+        <button type="submit">Extraire</button>
+    </form>
+
+    <p class="supported">
+        Scrapers disponibles :
+        <strong th:text="${#strings.listJoin(supportedSites, ', ')}">Erome, Generic</strong>
+    </p>
+    <p class="error" th:if="${error}" th:text="${error}"></p>
+</body>
+</html>
