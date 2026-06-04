@@ -65,6 +65,22 @@ public final class TopicalAuthorityPrompt {
           .append("- Views: realistic starting view count, integer in 50,000 to 500,000. ")
           .append("Bias toward the higher end for categories that are common.\n\n");
 
+        sb.append("CRITICAL — DO NOT include any of the following in any output field:\n")
+          .append("- The name of the source website or platform the video came from ")
+          .append("(e.g. \"EroMe\", \"Pornhub\", \"Xvideos\", \"xhamster\", or any other ")
+          .append("site name). Strip it on sight from the title, slug, description, ")
+          .append("AND every tag. The host brand has no place in the catalog.\n")
+          .append("- This site's own brand name (\"SpankyCouples\") — it is the SITE, ")
+          .append("not a tag, not a category, not a word to echo in any field.\n")
+          .append("- Any platform/URL slug words the source uses to label the file ")
+          .append("(e.g. \"tetona\", \"italiana\", the original Spanish URL slug, etc.). ")
+          .append("Translate the actual content subject (people, scene, activity); never ")
+          .append("echo the source's filename or URL slug verbatim.\n")
+          .append("- Words in any language other than English. Translate descriptive words ")
+          .append("(\"enormes\" → \"large\") so the catalog is monolingual English.\n")
+          .append("- Studio / network / brand / channel names — the only performer name ")
+          .append("that should appear is the name of the actual actress(es) in the video.\n\n");
+
         sb.append("OUTPUT FORMAT:\n")
           .append("Return a single valid JSON object with EXACTLY these fields, no other ")
           .append("text, no markdown fences, no commentary:\n")
