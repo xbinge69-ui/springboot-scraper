@@ -1,6 +1,6 @@
 # springboot-scraper
 
-A Spring Boot web application for scraping web content and videos from supported websites, with advanced video ingestion and CDN management capabilities.
+A Spring Boot web application for scraping web content and videos from supported websites, with end-to-end video ingestion, real ffmpeg-powered derivatives, and AI-assisted topical-authority metadata.
 
 ## 📋 Table of Contents
 
@@ -14,6 +14,10 @@ A Spring Boot web application for scraping web content and videos from supported
 - [Configuration](#configuration)
 - [Usage Guide](#usage-guide)
 - [Use Cases](#use-cases)
+- [Security Considerations](#security-considerations)
+- [Adding a New Site Scraper](#adding-a-new-site-scraper)
+- [Known Limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
 
 ## 📌 Overview
 
@@ -21,165 +25,88 @@ This application is designed to:
 - **Scrape web content** from any website (links, metadata, etc.)
 - **Extract videos** from supported video hosting sites
 - **Bypass CDN hotlink protection** through transparent proxying
-- **Ingest videos** into a managed catalog with automatic processing
-- **Upload to multiple hosts** (Doodstream, Vidara, Bunny CDN)
+- **Ingest videos** with a real ffmpeg pipeline (probe → compressed + preview + thumbnail)
+- **Upload to Bunny CDN** (the only CDN — all 3 derivatives go here)
+- **Enrich metadata** with a local Ollama LLM using a "Topical Authority" prompt that considers the existing catalog
 
 ## 🎯 Core Features
 
 ### 1. Generic Web Scraping (`/scrape`)
-Extracts all anchor links from any given URL.
-
-**Features:**
-- Parses HTML and extracts all `<a>` tags
-- Returns: link text, href URL, and title attributes
-- Uses Jsoup with Mozilla user-agent spoofing
-- HTML form interface for easy access
-
-**Returns:**
-- Page title
-- List of scraped items (text, href, description)
-- Item count
-
----
+Extracts all anchor links from any given URL using Jsoup. Returns page title and a list of `{text, href, description}` items.
 
 ### 2. Video Scraping (`/video/scrape`)
-Extracts video URLs from supported video hosting sites.
+Extracts video URLs from supported video hosting sites via a `SiteScraper` strategy interface.
 
 **Supported Sites:**
 - **Erome** (`erome.com`)
-- Extensible: add new sites by implementing `SiteScraper` interface
+- **Generic fallback** (regex on `<video>`, `<source>`, `[data-src]`, inline JS)
 
-**Erome Scraper Strategy:**
-The EromeScraper uses multiple strategies to locate video URLs:
-
-1. **Direct `<video>` tags**: `<video src="...">`
-2. **Source elements**: `<video><source src="..."></video>`
-3. **Lazy-loaded**: `[data-src]` attributes
-4. **Inline JS**: MP4 URLs embedded in script tags via regex
-
-Results are deduplicated and returned in discovery order.
-
-**Supported Formats:**
-- `.mp4` - MPEG-4 video
-- `.m3u8` - HLS streaming
-- `.webm` - WebM video codec
-- `.mov` - QuickTime video
-
----
+**Supported Formats:** `.mp4`, `.m3u8`, `.webm`, `.mov`
 
 ### 3. Video Proxy (`/video/stream`)
-Bypasses CDN hotlink protection to stream videos without 403 Forbidden errors.
+Bypasses CDN hotlink protection by streaming remote videos with browser-like headers (Chrome 124 UA, Referer, Origin). SSRF protection blocks loopback / link-local / site-local / multicast hosts.
 
-**How It Works:**
-- Receives video URL and optional referer
-- Spoofs HTTP headers:
-  - Browser User-Agent (Chrome 124)
-  - Referer header
-  - Origin header
-  - Accept-Language header
-- Streams video content with proper buffering (64 KB)
-- Supports partial content for seeking
+### 4. Video Enrichment (`/api/video/enrich`) — **recommended endpoint**
+End-to-end ingestion that takes a video (file upload or remote URL) plus draft metadata, and returns a fully enriched, persisted `VideoCatalogEntry` in the shape of the example below.
 
-**Security Features:**
-- Blocks localhost and private IP addresses (SSRF protection)
-- Validates URL hosts against allow-list
-- Checks for link-local, site-local, and multicast addresses
-- Proper timeout handling (20 seconds)
-
-**Response Features:**
-- Sets correct Content-Type (video/mp4, application/x-mpegURL, etc.)
-- Forwards Accept-Ranges header for seeking
-- Streams content-length header for progress bars
-
----
-
-### 4. Video Ingestion Pipeline (`/api/video/pipeline`)
-Comprehensive workflow to automatically process and catalog scraped videos.
-
-**Pipeline Steps:**
-
-1. **Validate Request**
-   - Check source URL is provided and valid
-   - Must start with `http://` or `https://`
-
-2. **Scrape Video**
-   - Extract first video from source page URL
-   - Throw error if no videos found
-
-3. **Upload to Hosts**
-   - Upload video to Doodstream (primary)
-   - Upload video to Vidara (backup)
-   - Returns embed URLs for both
-
-4. **Generate Derivatives**
-   - Download first 180 KB as JPG candidate (thumbnail)
-   - Download first 1.6 MB as MP4 candidate (preview)
-   - Upload to Bunny CDN
-   - Warning: lightweight mode (use FFmpeg for production quality)
-
-5. **Create Catalog Entry**
-   - Generate URL slug from title
-   - Set metadata: description, tags, category
-   - Assign actress info (ID or unknown name)
-   - Record view count
-   - Timestamp: `Instant.now()`
-
-6. **Save to Catalog**
-   - Append entry to `videos.json`
-   - Return entry with warnings
-
-**Request Format (JSON):**
 ```json
 {
-  "sourcePageUrl": "https://www.erome.com/a/abc123",
-  "title": "Video Title",
-  "description": "Video description",
-  "tags": "tag1, tag2, tag3",
-  "category": "Category Name",
-  "unknownActressName": "Actress Name",
-  "actressId": "actress-123",
-  "views": 1000
+  "id": "v3",
+  "slug": "passionate-amateur-couples-intimate-bedroom-advent",
+  "title": "Passionate Amateur Couple's Intimate Bedroom Adventure - SpankyCouples",
+  "description": "Experience the authentic passion of an amateur couple...",
+  "durationSeconds": 6,
+  "thumbnailKey": "https://example.b-cdn.net/videos/sample-test-35be011c0d31.thumbnail.jpg",
+  "previewUrl":   "https://example.b-cdn.net/videos/sample-test-35be011c0d31.preview.mp4",
+  "embedUrl":     "https://example.b-cdn.net/videos/sample-test-35be011c0d31.compressed.mp4",
+  "backupEmbedUrl": "https://example.b-cdn.net/videos/sample-test-35be011c0d31.compressed.mp4",
+  "tags": ["amateur", "couple", "passionate", "intimate", "bedroom", "spanky", "adult", "encounter"],
+  "category": "AmateurBedroomEncounters",
+  "publishedAt": "2026-06-04T14:08:16.332Z",
+  "actressId": null,
+  "unknownActressName": "Anonymous Couple",
+  "views": 300000
 }
 ```
 
-**Response Format:**
-```json
-{
-  "videoCatalogEntry": {
-    "slug": "video-title",
-    "title": "Video Title",
-    "description": "Video description",
-    "durationSeconds": 0,
-    "thumbnailKey": "https://bunny.cdn/thumbnail.jpg",
-    "previewUrl": "https://bunny.cdn/preview.mp4",
-    "embedUrl": "https://doodstream.com/d/video-id",
-    "backupEmbedUrl": "https://vidara.to/v/video-id",
-    "tags": ["tag1", "tag2", "tag3"],
-    "category": "Category Name",
-    "publishedAt": "2026-06-03T12:34:56.789Z",
-    "actressId": "actress-123",
-    "unknownActressName": "Actress Name",
-    "views": 1000
-  },
-  "warnings": ["Derivatives generated in lightweight mode. Replace with ffmpeg..."]
-}
+**Pipeline steps:**
+
+1. **Resolve source** — either a multipart upload or a remote URL. The URL is downloaded to a temp file with SSRF protection and a hard byte cap.
+2. **Probe** via `ffprobe` to read real width / height / duration / hasAudio.
+3. **Process** via `ffmpeg`:
+   - **compressed** — full-length 720p-capped re-encode (`force_original_aspect_ratio=decrease` so tiktok 9:16 stays 9:16 and small sources are never upscaled)
+   - **preview** — 5-second clip from ~40% of duration, same 720p cap
+   - **thumbnail** — single frame from ~20% of duration at the **source's native resolution** (no scale filter, so it's never stretched)
+4. **Upload to Bunny CDN** (3 streaming `PUT` requests, no `byte[]` allocation). 12-hex-char UUID shared across the 3 object keys.
+5. **Upload to Bunny** (3 streaming `PUT`s, no `byte[]` allocation) → thumbnailKey / previewUrl / embedUrl. `backupEmbedUrl` mirrors `embedUrl` since there's no second CDN.
+6. **Ollama "Topical Authority" pass** — sends the draft metadata + a compact catalog summary (top-30 tags with counts, category histogram, 30 most recent titles) to Ollama and gets back refined title/description/category/tags/slug + a starting view count. Server-side `options.format=json` + `options.temperature=0.2`.
+7. **Persist** to `videos.json` (atomic write to `.tmp` + `ATOMIC_MOVE`).
+8. **Cleanup** — all 4 local files deleted via `try-with-resources`. A startup sweeper also clears stale temp dirs from prior crashed JVMs.
+
+**Multipart request:**
+
+```bash
+curl -X POST http://localhost:8080/api/video/enrich \
+  -F "title=My Video Title" \
+  -F "description=Authentic bedroom scene" \
+  -F "category=Amateur" \
+  -F "tags=amateur,couple,bedroom" \
+  -F "videoFile=@/path/to/video.mp4"   # OR
+  # -F "videoUrl=https://example.com/video.mp4"
 ```
 
----
+**Validation (returns HTTP 400 + `{"error": "..."}`):**
+- `title` is required
+- Exactly one of `videoFile` / `videoUrl` is required
+- Both `videoFile` and `videoUrl` → 400
 
-### 5. Direct Video Upload (`/api/video/ingest-file`)
-Upload video files directly with metadata.
+**Response (HTTP 200):** the full persisted `VideoCatalogEntry` plus a `warnings: []` list. Warnings are populated on soft failures (e.g. Ollama offline → fallback metadata used).
 
-**Request Format (Multipart Form):**
-- `videoFile` (required): Video file binary
-- `title` (required): Video title
-- `description` (optional): Video description
-- `category` (optional): Video category
-- `tags` (optional): Comma-separated tags
-- `unknownActressName` (optional): Actress name if unknown
-- `actressId` (optional): Actress ID if known
+### 5. Page-URL Pipeline (`/api/video/pipeline`)
+Page-URL → first-video-URL → same enrichment orchestrator. Accepts the same JSON shape as before, but the new code path runs real ffmpeg + Ollama + Bunny instead of the byte-prefix hack.
 
-**Response:** Same as pipeline endpoint
+### 6. Direct File Upload (`/api/video/ingest-file`)
+Multipart upload → same enrichment orchestrator. Equivalent to `POST /api/video/enrich` with a file source.
 
 ---
 
@@ -189,155 +116,201 @@ Upload video files directly with metadata.
 |-----------|---------|---------|
 | **Java** | 21 | Language |
 | **Spring Boot** | 3.3.4 | Web framework |
-| **Spring Web MVC** | 3.3.4 | REST API & Controllers |
+| **Spring Web MVC** | 3.3.4 | REST API & controllers |
 | **Thymeleaf** | 3.x | HTML templating |
 | **Jsoup** | 1.17.2 | HTML parsing & CSS selectors |
 | **Jackson** | 2.x | JSON processing |
-| **Spring DevTools** | 3.3.4 | Hot reload development |
+| **FFmpeg / FFprobe** | any modern build | Video processing (system binary, must be on `PATH`) |
+| **ffmpeg-cli-wrapper** | 0.9.2 | Java fluent builder for ffmpeg/ffprobe |
+| **Spring DevTools** | 3.3.4 | Hot reload in dev |
 | **Maven** | - | Build tool |
+| **JUnit 5 + Mockito + AssertJ** | (via spring-boot-starter-test) | Test stack |
 
-**Optional Integrations:**
-- Bunny CDN - asset storage & CDN
-- Ollama - local AI model inference
-- Doodstream - video hosting
-- Vidara - video hosting (backup)
+**Optional integrations:**
+- **Bunny CDN** — asset storage & CDN (storage zone, pull base URL, API key)
+- **Ollama** — local AI model for the Topical Authority pass (default `http://localhost:11434`, model `mistral`)
+- **Ollama** — local AI model for the Topical Authority pass (default `http://localhost:11434`, model `mistral`)
 
 ## 📁 Project Structure
 
 ```
 springboot-scraper/
-├── pom.xml                          # Maven configuration
-├── README.md                        # This file
+├── pom.xml
+├── README.md
 ├── src/
-│   └── main/
-│       ├── java/com/example/scraper/
-│       │   ├── ScraperApplication.java           # Main entry point
-│       │   ├── controller/
-│       │   │   ├── ScraperController.java        # Web scraping endpoints
-│       │   │   └── VideoProxyController.java     # Video proxy endpoint
-│       │   ├── model/
-│       │   │   ├── ScrapedItem.java              # Link result model
-│       │   │   ├── VideoResult.java              # Video extraction result
-│       │   │   ├── PipelineRequest.java          # Pipeline API request
-│       │   │   ├── PipelineOutcome.java          # Pipeline API response
-│       │   │   ├── DirectVideoIngestRequest.java # Direct upload metadata
-│       │   │   ├── VideoCatalogEntry.java        # Catalog entry model
-│       │   │   └── ...
-│       │   ├── scraper/
-│       │   │   ├── SiteScraper.java              # Strategy interface
-│       │   │   ├── EromeScraper.java             # Erome implementation
-│       │   │   └── GenericVideoScraper.java      # Base scraper
-│       │   └── service/
-│       │       ├── ScraperService.java           # Generic web scraper
-│       │       ├── VideoScraperService.java      # Video site router
-│       │       ├── VideoIngestionPipelineService.java # Main pipeline
-│       │       ├── DirectVideoIngestService.java # Direct upload handler
-│       │       ├── VideoHostUploadService.java   # Host upload logic
-│       │       ├── BunnyAssetService.java        # Bunny CDN integration
-│       │       ├── MediaDerivativeService.java   # Thumbnail/preview gen
-│       │       ├── VideoCatalogService.java      # Catalog persistence
-│       │       ├── VideoEnricherService.java     # Metadata enrichment
-│       │       └── OllamaService.java            # AI inference
-│       └── resources/
-│           ├── application.properties            # Configuration
-│           └── templates/
-│               ├── index.html                    # Generic scraper UI
-│               ├── result.html                   # Scraping results
-│               ├── video-form.html               # Video scraper UI
-│               ├── video-result.html             # Video results
-│               ├── video-pipeline.html           # Pipeline UI
-│               └── video-upload.html             # Direct upload UI
-└── target/                          # Compiled artifacts
-
+│   ├── main/
+│   │   ├── java/com/example/scraper/
+│   │   │   ├── ScraperApplication.java
+│   │   │   ├── controller/
+│   │   │   │   ├── ScraperController.java          # /scrape, /video/*, /api/video/* (incl. /enrich)
+│   │   │   │   └── VideoProxyController.java       # /video/stream
+│   │   │   ├── model/
+│   │   │   │   ├── ScrapedItem.java
+│   │   │   │   ├── VideoResult.java
+│   │   │   │   ├── PipelineRequest.java
+│   │   │   │   ├── PipelineOutcome.java            # { entry, warnings }
+│   │   │   │   ├── VideoCatalogEntry.java          # id, slug, title, ..., views
+│   │   │   │   └── ...
+│   │   │   ├── scraper/
+│   │   │   │   ├── SiteScraper.java                # strategy interface
+│   │   │   │   ├── EromeScraper.java
+│   │   │   │   └── GenericVideoScraper.java
+│   │   │   ├── service/
+│   │   │   │   ├── ScraperService.java             # generic Jsoup scraper
+│   │   │   │   ├── VideoScraperService.java        # strategy router
+│   │   │   │   ├── VideoEnrichmentService.java     # orchestrator (ffmpeg + bunny + ollama + catalog)
+│   │   │   │   ├── VideoIngestionPipelineService.java # thin shim: page-URL → enrich
+│   │   │   │   ├── (Bunny is the only CDN; no upload-host service anymore)
+│   │   │   │   ├── BunnyAssetService.java          # streaming Path-based upload
+│   │   │   │   ├── VideoCatalogService.java        # atomic JSON I/O, slug uniqueness, summarize()
+│   │   │   │   └── OllamaService.java              # /api/generate with timeout + JSON options
+│   │   │   ├── util/
+│   │   │   │   ├── HttpVideoDownloader.java        # SSRF-guarded URL → file
+│   │   │   │   └── Slugify.java
+│   │   │   └── video/
+│   │   │       ├── FfmpegDerivativeService.java    # probe + process → 3 derivatives
+│   │   │       ├── FfmpegProperties.java
+│   │   │       ├── VideoMetadata.java               # record(width, height, durationSeconds, hasAudio)
+│   │   │       ├── Derivatives.java                 # record(compressedPath, previewPath, thumbnailPath)
+│   │   │       ├── EnrichmentSource.java            # sealed: LocalFile | RemoteUrl
+│   │   │       ├── EnrichmentMetadata.java
+│   │   │       ├── EnrichmentTempFiles.java         # AutoCloseable 4-file cleanup
+│   │   │       ├── TopicalAuthorityResult.java
+│   │   │       ├── TopicalAuthorityPrompt.java      # buildPrompt + defensive JSON parser
+│   │   │       └── VideoDerivativeCliRunner.java    # --cli.input CLI smoke runner
+│   │   └── resources/
+│   │       ├── application.properties
+│   │       └── templates/
+│   │           ├── index.html                       # generic scraper
+│   │           ├── result.html
+│   │           ├── video-form.html
+│   │           ├── video-result.html
+│   │           ├── video-pipeline.html
+│   │           └── video-upload.html
+│   └── test/
+│       └── java/com/example/scraper/
+│           ├── video/
+│           │   ├── FfmpegDerivativeServiceTest.java # 7 cases
+│           │   └── TopicalAuthorityPromptTest.java  # 19 cases
+│           ├── service/
+│           │   └── VideoEnrichmentServiceTest.java   # 3 cases (real ffmpeg, mocked Ollama + Bunny)
+│           └── util/
+│               └── HttpVideoDownloaderTest.java      # 8 cases
+└── target/
+    ├── classes/                                       # compiled
+    ├── test-fixtures/                                 # generated by tests
+    └── ...
 ```
 
 ## 🔌 Endpoints
 
 ### Web Scraping
-
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | Show web scraper form |
-| `POST` | `/scrape` | Scrape URL for links |
+| `GET` | `/` | Generic scraper form |
+| `POST` | `/scrape` | Extract `<a href>` links from a URL |
 
 ### Video Scraping
-
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/video` | Show video scraper form |
-| `POST` | `/video/scrape` | Extract videos from page |
+| `GET` | `/video` | Video scraper form |
+| `POST` | `/video/scrape` | Extract video URLs from a page |
+| `GET` | `/video/pipeline` | Pipeline form |
+| `GET` | `/video/upload` | Direct upload form |
 
-### Video Ingestion
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/video/pipeline` | Show pipeline form |
-| `POST` | `/api/video/pipeline` | Ingest video from URL (JSON) |
-| `GET` | `/video/upload` | Show direct upload form |
-| `POST` | `/api/video/ingest-file` | Upload & ingest video file |
+### Video Ingestion (API)
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/video/enrich` | multipart | **Recommended.** Real ffmpeg + Bunny + Ollama. Accepts `videoFile` **or** `videoUrl`. |
+| `POST` | `/api/video/pipeline` | JSON | Page-URL → first video URL → enrich. |
+| `POST` | `/api/video/ingest-file` | multipart | Direct file upload → enrich. |
 
 ### Video Proxy
-
 | Method | Path | Parameters | Description |
 |--------|------|-----------|-------------|
-| `GET` | `/video/stream` | `url`, `referer` (opt) | Proxy video stream |
+| `GET` | `/video/stream` | `url`, `referer` (opt) | Proxy a video with browser-like headers. |
+
+### Internal (CLI smoke)
+```
+./mvnw spring-boot:run -Dspring-boot.run.arguments="--cli.input=path/to/video.mp4 --cli.out=/tmp/out --cli.name=demo"
+```
+Runs the ffmpeg pipeline on `cli.input` and writes `{demo.compressed.mp4, demo.preview.mp4, demo.thumbnail.jpg}` into `cli.out`. The web app stays running on port 8080 after the CLI work finishes.
 
 ---
 
 ## 🏗 Architecture
 
-### Design Patterns Used
-
-#### 1. **Strategy Pattern** (SiteScraper)
-Each supported website has its own scraper implementation:
-```
-SiteScraper (interface)
-├── EromeScraper (Erome.com)
-├── GenericVideoScraper (fallback)
-└── (+ new implementations for new sites)
-```
-
-**Benefits:**
-- Isolates site-specific logic
-- Easy to add new sites without modifying service layer
-- Spring auto-discovers all `@Component` implementations
-- Open/Closed Principle
-
-#### 2. **Service Layer**
-Organized by concern:
-- `VideoScraperService` - Route to correct scraper
-- `VideoIngestionPipelineService` - Orchestrate workflow
-- `VideoHostUploadService` - Abstract host uploads
-- `BunnyAssetService` - Bunny CDN integration
-- `VideoEnricherService` - Metadata enrichment
-- `OllamaService` - AI features
-
-#### 3. **Dependency Injection**
-Spring Boot automatically:
-- Discovers all `SiteScraper` implementations
-- Injects them into `VideoScraperService`
-- Wires all service dependencies
-
-### Data Flow
+### Service graph
 
 ```
-User Input (URL/File)
-    ↓
+                    HTTP
+                      │
+                      ▼
+            ScraperController  ─────────────────────────────────────────────┐
+            │  /api/video/enrich (multipart, file OR url)                 │
+            │  /api/video/pipeline (page-URL JSON)                        │
+            │  /api/video/ingest-file (multipart)                         │
+            └─────┬────────────────────────────────────────────┬──────────┘
+                  │                                            │
+                  │ (URL scrape)                  (file/url)   │
+                  ▼                                            ▼
+       VideoIngestionPipelineService            VideoEnrichmentService
+       (page-URL → first video URL)            (orchestrator)
+                  │                                    │
+                  └──────────────┬─────────────────────┘
+                                 │
+                ┌────────────────┼────────────────┐
+                │                │                │
+                ▼                ▼                ▼
+       HttpVideoDownloader   FfmpegDerivativeService     BunnyAssetService
+       (URL → temp file,      (probe + process →         (streaming Path
+        SSRF guard,           compressed + preview +      upload × 3, no
+        size cap)             thumbnail, all on disk)     byte[] allocation)
+                                                                 │
+                ┌────────────────┐                               ▼
+                │                │                       Bunny CDN
+                ▼                ▼
+       (all 3 derivatives       OllamaService  ──►  local LLM
+        to Bunny CDN)            (Topical Authority
+                                 prompt + JSON-mode)
+                │                │
+                ▼                │
+       CatalogService ◄──────────┘
+       (atomic JSON I/O,
+        slug uniqueness,
+        summarize())
+                │
+                ▼
+           videos.json
+```
+
+### Design patterns
+
+- **Strategy** — `SiteScraper` per host, auto-discovered as `@Component`.
+- **Sealed sum types** — `EnrichmentSource` (LocalFile | RemoteUrl) so the orchestrator has a closed set of inputs.
+- **AutoCloseable record** — `EnrichmentTempFiles` makes try-with-resources the canonical cleanup pattern.
+- **Sealed-style helper** — `TopicalAuthorityPrompt` is a pure-function class (no Spring) for easy unit testing.
+- **Sweeper for crash recovery** — `VideoEnrichmentService.@PostConstruct` removes stale `scraper-enrich-*` dirs from prior crashed JVMs.
+
+### Data flow: a single `/api/video/enrich` request
+
+```
 Controller
-    ↓
-VideoScraperService (route to scraper)
-    ↓
-SiteScraper (EromeScraper, etc.)
-    ↓
-VideoResult (extracted URLs)
-    ↓
-VideoIngestionPipelineService
-    ├→ VideoHostUploadService (Doodstream, Vidara)
-    ├→ MediaDerivativeService (generate thumbnail/preview)
-    ├→ BunnyAssetService (upload assets)
-    └→ VideoCatalogService (persist)
-    ↓
-PipelineOutcome (result + warnings)
+  ├─ Validate (title present, exactly one of file/url)
+  ├─ MultipartFile.transferTo(tmp)  OR  pass URL through
+  ▼
+VideoEnrichmentService
+  ├─ Create per-request tempdir (UUID)
+  ├─ For URL: HttpVideoDownloader → tempdir/input.bin (SSRF guard, 2 GB cap)
+  ├─ FfmpegDerivativeService.probe(input)        → VideoMetadata (duration!)
+  ├─ FfmpegDerivativeService.process(input, dir) → Derivatives (3 paths)
+  ├─ BunnyAssetService.uploadBytes × 3           → 3 URLs (shared 12-hex UUID)
+  ├─ VideoCatalogService.summarize()             → compact JSON
+  ├─ OllamaService.generate(prompt, {format:json, temperature:0.2})
+  ├─ TopicalAuthorityPrompt.parse(response)      → TopicalAuthorityResult
+  ├─ Build VideoCatalogEntry (duration from probe, all fields populated)
+  ├─ VideoCatalogService.append(entry)           → atomic write to videos.json
+  └─ Cleanup: EnrichmentTempFiles.close() (4 deletes) + tempdir removal
 ```
 
 ---
@@ -346,294 +319,290 @@ PipelineOutcome (result + warnings)
 
 ### Prerequisites
 - **Java 21** or higher
-- **Maven 3.8+**
-- **Git**
+- **Maven 3.8+** (the bundled `mvnw` works)
+- **ffmpeg** + **ffprobe** on `PATH` (used by the enrichment pipeline). Install via your package manager; on Windows a portable build at `D:\PATH_Programs\` works as long as both `.exe`s are on `PATH`.
+- **Ollama** *(optional but recommended)* — `ollama serve` on `localhost:11434` with a model pulled (default `mistral`). The endpoint still works without Ollama — it'll just use the input metadata unchanged and add a warning.
 
 ### Steps
 
-1. **Clone the repository**
+1. **Clone & build**
    ```bash
-   git clone https://github.com/your-repo/springboot-scraper.git
+   git clone <repo-url>
    cd springboot-scraper
-   ```
-
-2. **Build the project**
-   ```bash
    ./mvnw clean package
    ```
-   Or on Windows:
-   ```batch
-   mvnw.cmd clean package
-   ```
 
-3. **Run the application**
+2. **Run the app**
    ```bash
    ./mvnw spring-boot:run
    ```
-   Or directly:
+   Web UI at **http://localhost:8080**.
+
+3. **Hit the enrichment endpoint**
    ```bash
-   java -jar target/scraper-0.0.1-SNAPSHOT.jar
+   curl -X POST http://localhost:8080/api/video/enrich \
+     -F "title=Test" \
+     -F "videoFile=@/path/to/video.mp4"
    ```
 
-4. **Access the application**
-   - Open browser to: **http://localhost:8080**
-   - Main menu with links to all features
-
-### Development Setup
-
-For hot reload during development:
+### Dev mode (hot reload)
 ```bash
 ./mvnw spring-boot:run -Dspring-boot.run.fork=false
 ```
+Spring DevTools auto-reloads on class changes.
 
-Spring DevTools will auto-reload on file changes.
+### Tests
+```bash
+./mvnw test                                                    # full suite (37 tests, ~45s)
+./mvnw -Dtest=FfmpegDerivativeServiceTest test                # just the ffmpeg tests
+./mvnw -Dtest=TopicalAuthorityPromptTest test                 # just the prompt parser
+./mvnw -Dtest=VideoEnrichmentServiceTest test                 # the orchestrator
+./mvnw -Dtest=HttpVideoDownloaderTest test                    # the URL downloader
+```
+Tests that need real `ffmpeg` (FfmpegDerivativeServiceTest, VideoEnrichmentServiceTest) skip cleanly when `ffmpeg` is not on `PATH`.
 
 ---
 
 ## ⚙️ Configuration
 
-Edit `src/main/resources/application.properties`:
+All settings live in `src/main/resources/application.properties`.
 
 ```properties
-# Server
+# --- Server ---
 server.port=8080
 spring.application.name=scraper
+spring.thymeleaf.cache=false
 
-# Thymeleaf
-spring.thymeleaf.cache=false    # Set to true in production
+# --- Multipart upload limits (POST /api/video/enrich accepts up to ~2 GB) ---
+spring.servlet.multipart.max-file-size=2GB
+spring.servlet.multipart.max-request-size=2GB
+server.tomcat.max-swallow-size=-1
+server.tomcat.connection-timeout=120s
 
-# Video Catalog
-app.catalog.videos-file=../src/data/videos.json
+# --- Catalog ---
+app.catalog.videos-file=../src/data/videos.json   # relative to JVM CWD
 
-# Pipeline
-app.pipeline.mock-uploads=true   # Set to false to use real uploads
-
-# Video Host Configuration
-app.upload.doodstream.prefix=https://doodstream.com/d
-app.upload.vidara.prefix=https://vidara.to/v
-
-# Bunny CDN Configuration
-app.bunny.enabled=false                    # Set to true to enable
-app.bunny.storage-zone=your-zone
-app.bunny.api-key=your-api-key
-app.bunny.storage-region=us-west
+# --- Bunny CDN ---
+app.bunny.enabled=false                            # set to true to upload
+app.bunny.storage-zone=
+app.bunny.api-key=
+app.bunny.storage-region=
 app.bunny.pull-base-url=https://example.b-cdn.net
 app.bunny.folder=videos
 
-# Ollama (AI Model) Configuration
+# --- Ollama ---
 app.ollama.enabled=true
 app.ollama.url=http://localhost:11434
 app.ollama.model=mistral
 app.ollama.timeout-seconds=120
+
+# --- FFmpeg / FFprobe (system binaries) ---
+app.ffmpeg.path=ffmpeg
+app.ffprobe.path=ffprobe
+app.ffmpeg.preview-duration-seconds=5
+app.ffmpeg.thumbnail-position=0.20
+app.ffmpeg.preview-position=0.40
+app.ffmpeg.target-max-width=1280
+app.ffmpeg.target-max-height=720
+app.ffmpeg.preview-crf=28
+app.ffmpeg.preview-preset=fast
+app.ffmpeg.compressed-crf=23
+app.ffmpeg.compressed-preset=medium
+app.ffmpeg.thumbnail-quality=2
+
+# --- Enrichment endpoint ---
+app.enrichment.ffmpeg-timeout-seconds=300
+app.enrichment.ollama-format=json
+app.enrichment.ollama-temperature=0.2
+app.enrichment.max-download-bytes=2147483648
+app.enrichment.download-connect-timeout-seconds=30
+app.enrichment.download-read-timeout-seconds=300
+app.enrichment.sweeper-stale-minutes=60
 ```
 
-### Configuration Guide
+### Property reference
 
-| Property | Purpose | Example Value |
-|----------|---------|---------------|
-| `server.port` | HTTP server port | `8080` |
-| `app.catalog.videos-file` | Catalog JSON location | `../src/data/videos.json` |
-| `app.pipeline.mock-uploads` | Mock uploads for testing | `true` |
-| `app.bunny.enabled` | Enable Bunny CDN | `false` |
-| `app.bunny.api-key` | Bunny API key | `your-key-here` |
-| `app.ollama.enabled` | Enable AI inference | `true` |
+| Property | Default | Purpose |
+|----------|---------|---------|
+| `server.port` | `8080` | HTTP port |
+| `spring.servlet.multipart.max-file-size` | `2GB` | Max upload size |
+| `app.catalog.videos-file` | `../src/data/videos.json` | Where the catalog JSON is read/written |
+| `app.pipeline.mock-uploads` | `true` | (legacy, no longer used) |
+| `app.bunny.enabled` | `false` | If false, bunny "uploads" short-circuit and return a would-be public URL |
+| `app.bunny.storage-zone` / `api-key` / `storage-region` / `pull-base-url` | empty / `https://example.b-cdn.net` | Bunny credentials + CDN base |
+| `app.ollama.url` / `model` / `timeout-seconds` | `http://localhost:11434` / `mistral` / `120` | LLM endpoint |
+| `app.ffmpeg.path` / `app.ffprobe.path` | `ffmpeg` / `ffprobe` | Must resolve on `PATH` |
+| `app.ffmpeg.target-max-width/height` | `1280` / `720` | Cap applied to compressed + preview |
+| `app.ffmpeg.thumbnail-position` | `0.20` | Where in the timeline the thumbnail frame is taken |
+| `app.ffmpeg.preview-position` | `0.40` | Where the 5-second preview clip starts |
+| `app.enrichment.ffmpeg-timeout-seconds` | `300` | Per ffmpeg sub-encode (probe/process); 3× for process |
+| `app.enrichment.max-download-bytes` | `2147483648` | Cap on URL-based video download (2 GB) |
+| `app.enrichment.sweeper-stale-minutes` | `60` | Temp dirs older than this are swept on app start |
 
 ---
 
 ## 📖 Usage Guide
 
-### Example 1: Scrape Generic Website
+### Example 1: Scrape a website
+```
+http://localhost:8080/  →  enter a URL  →  see all <a> links
+```
 
-1. Navigate to **http://localhost:8080/**
-2. Enter URL: `https://example.com`
-3. Click "Scraper"
-4. View extracted links
+### Example 2: Extract videos from Erome
+```
+http://localhost:8080/video  →  enter an Erome album URL
+```
 
-### Example 2: Extract Videos from Erome
+### Example 3: Enrich a video via the API
+```bash
+curl -X POST http://localhost:8080/api/video/enrich \
+  -F "title=Amateur Couple Bedroom" \
+  -F "description=Authentic bedroom scene" \
+  -F "category=Amateur" \
+  -F "tags=amateur,couple,bedroom" \
+  -F "videoFile=@./my-video.mp4"
+```
+Response is a fully populated `VideoCatalogEntry` (see the JSON example in [Core Features §4](#4-video-enrichment-apivideoenrich--recommended-endpoint)).
 
-1. Navigate to **http://localhost:8080/video**
-2. Enter Erome album URL: `https://www.erome.com/a/xxxxxxxx`
-3. Click "Scraper"
-4. View extracted video URLs
+### Example 4: Enrich from a remote URL
+```bash
+curl -X POST http://localhost:8080/api/video/enrich \
+  -F "title=My Video" \
+  -F "videoUrl=https://example.com/path/to/video.mp4"
+```
+The URL is downloaded server-side (SSRF-guarded, size-capped), processed, uploaded, and cataloged.
 
-### Example 3: Run Ingestion Pipeline (API)
-
-**Request:**
+### Example 5: Page-URL → enrich
 ```bash
 curl -X POST http://localhost:8080/api/video/pipeline \
   -H "Content-Type: application/json" \
   -d '{
     "sourcePageUrl": "https://www.erome.com/a/abc123",
     "title": "My Video Title",
-    "description": "A great video",
-    "tags": "awesome, video, content",
-    "category": "Entertainment",
-    "unknownActressName": "Jane Doe",
-    "views": 500
+    "category": "Amateur",
+    "tags": "couple, bedroom"
   }'
 ```
 
-### Example 4: Upload Video File Directly
-
-**Request:**
+### Example 6: CLI smoke (no HTTP)
 ```bash
-curl -X POST http://localhost:8080/api/video/ingest-file \
-  -F "videoFile=@/path/to/video.mp4" \
-  -F "title=My Uploaded Video" \
-  -F "description=Uploaded directly" \
-  -F "category=Personal" \
-  -F "tags=uploaded, personal" \
-  -F "unknownActressName=Admin"
+./mvnw spring-boot:run \
+  -Dspring-boot.run.arguments="--cli.input=./test.mp4 --cli.out=/tmp/out --cli.name=demo"
 ```
+Generates `{demo.compressed.mp4, demo.preview.mp4, demo.thumbnail.jpg}` in `/tmp/out`. Useful for verifying the ffmpeg pipeline without the catalog.
 
-### Example 5: Stream Video Through Proxy
-
-**Request:**
+### Example 7: Stream via the proxy
 ```bash
-curl "http://localhost:8080/video/stream?url=https://example.com/video.mp4&referer=https://example.com/"
-```
-
-**Browser:**
-```html
-<video width="640" height="480" controls>
-  <source src="http://localhost:8080/video/stream?url=https://example.com/video.mp4" type="video/mp4">
-</video>
+curl "http://localhost:8080/video/stream?url=https://hotlink-protected.example.com/v.mp4&referer=https://hotlink-protected.example.com/"
 ```
 
 ---
 
 ## 💡 Use Cases
 
-### 1. **Video Archive System**
-- Scrape video metadata from existing sites
-- Organize in unified catalog
-- Support multiple backup hosts
+### 1. End-to-end video archival
+Scrape a video from a supported host, enrich it via the LLM for SEO metadata, and persist it to the catalog with thumbnails and previews ready to ship to a CDN.
 
-### 2. **Content Distribution Network**
-- Ingest from primary source
-- Distribute to multiple CDNs
-- Manage with unified interface
+### 2. Bulk ingestion
+The `POST /api/video/enrich` endpoint is designed for a pipeline. Send batches of `{videoUrl, title, ...}` records through curl/Postman; each call produces a catalog entry.
 
-### 3. **Video Library Management**
-- Upload local videos
-- Auto-generate thumbnails & previews
-- Tag and categorize content
-- Track view counts
+### 3. Topical Authority building
+The Ollama prompt asks the LLM to *prefer existing categories and tags* from the existing catalog, so a single site's entries naturally cluster — better internal linking, better SEO.
 
-### 4. **CDN Bypass Solution**
-- Stream videos blocked by hotlink protection
-- Transparent proxy with header spoofing
-- No client-side changes needed
+### 4. CDN hotlink bypass
+Stream any CDN-protected video through `/video/stream` with browser-like headers.
 
-### 5. **Content Aggregation**
-- Multi-site scraping capability
-- Extract & catalog diverse sources
-- Extensible architecture for new sites
-
-### 6. **Metadata Enrichment**
-- Custom tagging & categorization
-- Actress/performer tracking
-- View statistics
-- AI-powered description generation (via Ollama)
+### 5. Multi-host uploads
+All three derivatives (thumbnail/preview/compressed) go to Bunny CDN as separate objects sharing a 12-hex-char UUID.
 
 ---
 
 ## 🔒 Security Considerations
 
-### Implemented Protections
+### Implemented protections
 
-1. **SSRF (Server-Side Request Forgery) Prevention**
-   - Blocks localhost and private IP ranges
-   - Validates all host addresses
-   - Timeout protection (20 seconds)
+1. **SSRF (Server-Side Request Forgery) prevention** — both `VideoProxyController` and `HttpVideoDownloader` reject:
+   - `localhost`, `*.local`
+   - Any resolved IP that is loopback / link-local / site-local / multicast
+2. **Download size cap** — `app.enrichment.max-download-bytes` (default 2 GB) checked against `Content-Length` and enforced mid-stream.
+3. **Multipart limits** — file size + request size + Tomcat swallow size all configured.
+4. **Filename sanitization** — uploaded files are written to UUID temp paths; the original filename is used for the slug only (not the on-disk path).
+5. **Atomic catalog writes** — `videos.json` is never partially written; a crash mid-write preserves the previous good copy.
+6. **Per-fmpeg timeout** — ffmpeg calls are wrapped with `Future.get(timeout)` + cancel so a wedged encoder can't hang the JVM.
+7. **ffmpeg concurrency cap** — `Semaphore(availableProcessors / 2)` around ffmpeg so concurrent requests don't saturate CPU.
 
-2. **URL Validation**
-   - Only `http://` and `https://` protocols allowed
-   - Domain whitelist support (extensible)
+### Recommendations for production
 
-3. **Header Spoofing (Intentional)**
-   - Browser User-Agent mimicking
-   - Referer header spoofing
-   - Origin header manipulation
-   - Purpose: bypass CDN hotlink protection
-
-### Recommendations
-
-1. **Production Deployment**
-   - Set `spring.thymeleaf.cache=true`
-   - Add authentication/authorization layer
-   - Use HTTPS only
-   - Implement rate limiting
-   - Add request logging & monitoring
-
-2. **API Security**
-   - Implement OAuth2/JWT tokens
-   - Add request signing
-   - Rate limiting per IP/token
-   - Audit logging
-
-3. **Data Protection**
-   - Encrypt sensitive configuration
-   - Use environment variables for secrets
-   - Rotate API keys regularly
-   - Validate all user input
+1. **Authentication** — currently the API is open. Add a shared-secret header check or Spring Security.
+2. **Rate limiting** — per-IP rate limits on the enrichment endpoint (it does ~10-30s of CPU work per request).
+3. **Reverse proxy timeouts** — the enrichment request takes ~70s end-to-end. Configure your reverse proxy (`nginx`, Cloudflare) to allow 100-120s upstream timeouts.
+4. **TLS** — run behind HTTPS in production; the cookie/session model is currently insecure for any non-localhost use.
+5. **Secrets** — store Bunny API key, Ollama URL, etc. in environment variables rather than the properties file.
 
 ---
 
 ## 📦 Adding a New Site Scraper
 
-1. **Create scraper class** implementing `SiteScraper`:
+1. Create a `@Component` implementing `SiteScraper`:
    ```java
    @Component
    @Order(20)
    public class MyNewScraper implements SiteScraper {
-       
-       @Override
-       public boolean supports(String url) {
-           return url != null && url.contains("mysite.com");
-       }
-       
-       @Override
-       public String siteName() {
-           return "MyNewSite";
-       }
-       
-       @Override
-       public VideoResult extractVideos(String url) throws IOException {
-           // Your scraping logic
-       }
+       @Override public boolean supports(String url) { return url != null && url.contains("mysite.com"); }
+       @Override public String siteName() { return "MyNewSite"; }
+       @Override public VideoResult extractVideos(String url) throws IOException { /* ... */ }
    }
    ```
+2. Spring auto-discovers the bean.
+3. `VideoScraperService` routes to it via `supports(url)`.
+4. No other changes needed.
 
-2. **Spring auto-discovers** the component
-3. **Router automatically** uses it for matching URLs
-4. **No other changes needed!**
+---
+
+## ⚠️ Known Limitations
+
+These are documented in the project plan (`plans/`) and flagged for follow-up:
+
+| # | Limitation | Mitigation today | Workaround |
+|---|------------|------------------|------------|
+| L1 | **Enrichment endpoint is synchronous (~70s)** | Tomcat `connection-timeout=120s` | Set reverse-proxy timeouts ≥ 100s; or rewrite as `202 Accepted` + poll |
+| L2 | **No auth on `/api/video/enrich`** | Bound to localhost by default | Add a shared-secret header check or Spring Security |
+| L3 | **Concurrent enrich requests see a stale catalog** (TOCTOU) | None | Documented; serialize via a single-thread executor or accept the race |
+| L4 | **Bunny orphans on partial upload** (uploads 1-2 succeed, 3 fails → catalog never written) | None | Documented; future: a daily sweep that diffs Bunny ↔ catalog |
+| L5 | *removed — Bunny is now the only CDN* | n/a | n/a |
+| L6 | **No progress reporting** during long ffmpeg encodes | SLF4J logs `start` / `done` per output | Future: wire `FFmpegProgressListener` |
+| L7 | **`videos.json` path is CWD-relative** | Resolved with `toAbsolutePath().normalize()` on read | Document; consider making absolute in `application.properties` |
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Issue: "Aucun scraper disponible pour : URL"
-- **Cause**: URL not supported by any enabled scraper
-- **Solution**: Verify URL is for a supported site (e.g., erome.com)
+### `UnsupportedClassVersionError` / Spring Boot fails to start
+**Cause:** Java 8/11 in `JAVA_HOME`; Spring Boot 3.3.4 needs Java 17+ and the project targets Java 21.  
+**Fix:** Set `JAVA_HOME` to a JDK 21 install (e.g. `C:\Users\nicol\.jdks\openjdk-21.0.1`), then `./mvnw -v` to confirm.
 
-### Issue: "Erreur lors du scraping"
-- **Cause**: Network error, malformed HTML, or timeout
-- **Solution**: Check URL is accessible, try again with different URL
+### `ffmpeg not found` / tests skip
+**Cause:** ffmpeg/ffprobe not on `PATH`.  
+**Fix:** Install ffmpeg (`winget install Gyan.FFmpeg` on Windows, `apt install ffmpeg` on Debian/Ubuntu, `brew install ffmpeg` on macOS), or set `app.ffmpeg.path=D:/path/to/ffmpeg.exe` in `application.properties`.
 
-### Issue: 403 Forbidden from CDN
-- **Cause**: Hotlink protection
-- **Solution**: Use proxy endpoint: `/video/stream?url=...`
+### Ollama timeout / no response
+**Cause:** Ollama not running or wrong URL.  
+**Fix:** `curl http://localhost:11434/api/tags` to verify; the endpoint still works without Ollama but uses fallback metadata and adds a warning.
 
-### Issue: Port 8080 already in use
-- **Solution**: Change in `application.properties`:
-  ```properties
-  server.port=8081
-  ```
+### `/api/video/enrich` returns 500 with `One of videoFile or videoUrl is required`
+**Cause:** Validation fired (you sent neither, or both).  
+**Fix:** Send exactly one of `videoFile` / `videoUrl`. (Older `400` vs `500` is now fixed — this is a 400.)
 
-### Issue: Bunny CDN upload fails
-- **Cause**: API key misconfigured or quota exceeded
-- **Solution**: Check credentials in `application.properties`
+### Port 8080 already in use
+**Fix:** `server.port=8081` in `application.properties` (or stop the other process).
+
+### Bunny CDN upload fails with non-2xx
+**Cause:** API key/zone wrong, or quota exceeded.  
+**Fix:** Verify `app.bunny.*` properties. With `app.bunny.enabled=false`, uploads short-circuit and return mock URLs — useful for local dev.
+
+### Spring DevTools keeps reloading mid-encode
+**Cause:** Auto-restart triggered by some file change.  
+**Fix:** Disable DevTools in production profile, or exclude the catalog path from the trigger set.
 
 ---
 
@@ -658,5 +627,4 @@ For issues and questions:
 
 ---
 
-**Last Updated:** June 3, 2026
-
+**Last Updated:** June 4, 2026 (rev: removed Doodstream/Vidara, Bunny-only)

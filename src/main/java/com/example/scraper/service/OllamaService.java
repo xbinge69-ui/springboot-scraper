@@ -6,10 +6,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -28,7 +30,12 @@ public class OllamaService {
         this.ollamaUrl = ollamaUrl.endsWith("/") ? ollamaUrl.substring(0, ollamaUrl.length() - 1) : ollamaUrl;
         this.modelName = modelName;
         this.timeoutSeconds = timeoutSeconds;
-        this.restTemplate = new RestTemplate();
+        // Wire the previously-dead `timeoutSeconds` field into a real factory so
+        // a wedged Ollama can't hang the enrichment thread forever.
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout((int) Duration.ofSeconds(Math.min(timeoutSeconds, 30)).toMillis());
+        factory.setReadTimeout((int) Duration.ofSeconds(timeoutSeconds).toMillis());
+        this.restTemplate = new RestTemplate(factory);
         this.objectMapper = new ObjectMapper();
     }
 
@@ -40,10 +47,21 @@ public class OllamaService {
      * @throws Exception if Ollama is unreachable or generation fails
      */
     public String generate(String prompt) throws Exception {
+        return generate(prompt, Map.of());
+    }
+
+    /**
+     * Generate text with model-options (e.g. {@code format=json},
+     * {@code temperature=0.2}) injected into the Ollama request body.
+     */
+    public String generate(String prompt, Map<String, Object> options) throws Exception {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelName);
         requestBody.put("prompt", prompt);
         requestBody.put("stream", false);
+        if (options != null && !options.isEmpty()) {
+            requestBody.put("options", options);
+        }
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -92,5 +110,9 @@ public class OllamaService {
 
     public String getOllamaUrl() {
         return ollamaUrl;
+    }
+
+    public long getTimeoutSeconds() {
+        return timeoutSeconds;
     }
 }

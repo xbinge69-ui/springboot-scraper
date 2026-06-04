@@ -7,13 +7,19 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 
 @Service
 public class BunnyAssetService {
+
+    /** Read timeout for streaming uploads. Set to 5 min so a 100 MB file at 1 MB/s has headroom. */
+    private static final int UPLOAD_READ_TIMEOUT_MS = 5 * 60 * 1000;
+    private static final int UPLOAD_CONNECT_TIMEOUT_MS = 15_000;
+    private static final int STREAM_BUFFER_BYTES = 64 * 1024;
+    /** 12 hex chars = 48 bits → birthday collision around 16M objects. */
+    private static final int UUID_HEX_CHARS = 12;
 
     @Value("${app.bunny.enabled:false}")
     private boolean bunnyEnabled;
@@ -33,51 +39,85 @@ public class BunnyAssetService {
     @Value("${app.bunny.folder:uploads}")
     private String folder;
 
-    public String uploadThumbnail(byte[] content, String slug) throws IOException {
-        String objectPath = folder + "/" + slug + "-" + UUID.randomUUID().toString().substring(0, 8) + ".jpg";
-        return uploadBytes(content, objectPath, "image/jpeg");
-    }
-
-    public String uploadPreview(byte[] content, String slug) throws IOException {
-        String objectPath = folder + "/" + slug + "-" + UUID.randomUUID().toString().substring(0, 8) + ".mp4";
-        return uploadBytes(content, objectPath, "video/mp4");
+    /**
+     * Generate a 12-hex-char identifier for object keys. Callers can use the
+     * same UUID across the 3 derivatives of one video so a single
+     * {@code ls <slug>-<uuid>*} reveals the whole set.
+     */
+    public static String newRequestUuid() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, UUID_HEX_CHARS);
     }
 
     public String uploadBytes(byte[] content, String objectPath, String contentType) throws IOException {
-        String normalizedObjectPath = objectPath.startsWith("/") ? objectPath.substring(1) : objectPath;
-        String publicUrl = stripTrailingSlash(pullBaseUrl) + "/" + normalizedObjectPath;
-
         if (!bunnyEnabled) {
-            return publicUrl;
+            return publicUrlFor(objectPath);
         }
+        ensureConfigured();
+        HttpURLConnection conn = openConnection(objectPath, contentType);
+        try (OutputStream out = conn.getOutputStream()) {
+            out.write(content);
+        }
+        return checkStatusAndReturn(objectPath, conn);
+    }
 
+    /**
+     * Streaming upload from a {@link Path}. Avoids loading the whole file into
+     * a {@code byte[]}, so a 2 GB upload doesn't OOM the JVM. Returns the
+     * public CDN URL.
+     */
+    public String uploadBytes(Path source, String objectPath, String contentType) throws IOException {
+        if (!bunnyEnabled) {
+            return publicUrlFor(objectPath);
+        }
+        ensureConfigured();
+        HttpURLConnection conn = openConnection(objectPath, contentType);
+        try (OutputStream out = conn.getOutputStream()) {
+            byte[] buf = new byte[STREAM_BUFFER_BYTES];
+            int read;
+            try (var in = Files.newInputStream(source)) {
+                while ((read = in.read(buf)) != -1) {
+                    out.write(buf, 0, read);
+                }
+            }
+        }
+        return checkStatusAndReturn(objectPath, conn);
+    }
+
+    private void ensureConfigured() {
         if (storageZone.isBlank() || apiKey.isBlank()) {
             throw new IllegalStateException("Bunny enabled but storage-zone/api-key are not configured.");
         }
+    }
 
-        String host = storageRegion == null || storageRegion.isBlank()
+    private HttpURLConnection openConnection(String objectPath, String contentType) throws IOException {
+        String host = (storageRegion == null || storageRegion.isBlank())
                 ? "storage.bunnycdn.com"
                 : storageRegion + ".storage.bunnycdn.com";
-
-        URL url = new URL("https://" + host + "/" + storageZone + "/" + normalizedObjectPath);
+        URL url = new URL("https://" + host + "/" + storageZone + "/" + normalizeObjectPath(objectPath));
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("PUT");
         conn.setDoOutput(true);
         conn.setRequestProperty("AccessKey", apiKey);
         conn.setRequestProperty("Content-Type", contentType);
-        conn.setConnectTimeout(15_000);
-        conn.setReadTimeout(25_000);
+        conn.setConnectTimeout(UPLOAD_CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(UPLOAD_READ_TIMEOUT_MS);
+        return conn;
+    }
 
-        try (OutputStream out = conn.getOutputStream()) {
-            out.write(content);
-        }
-
+    private String checkStatusAndReturn(String objectPath, HttpURLConnection conn) throws IOException {
         int status = conn.getResponseCode();
         if (status < 200 || status >= 300) {
-            throw new IOException("Bunny upload failed with status " + status + " for " + normalizedObjectPath);
+            throw new IOException("Bunny upload failed with status " + status + " for " + objectPath);
         }
+        return publicUrlFor(objectPath);
+    }
 
-        return publicUrl;
+    private String publicUrlFor(String objectPath) {
+        return stripTrailingSlash(pullBaseUrl) + "/" + normalizeObjectPath(objectPath);
+    }
+
+    private String normalizeObjectPath(String objectPath) {
+        return objectPath.startsWith("/") ? objectPath.substring(1) : objectPath;
     }
 
     private String stripTrailingSlash(String s) {
@@ -85,5 +125,9 @@ public class BunnyAssetService {
             return "";
         }
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
+    }
+
+    public String getFolder() {
+        return folder;
     }
 }
