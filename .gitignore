@@ -11,3 +11,10 @@ target/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local env files with secrets (use .env.example as a template).
+# Never commit the real `.env` — it contains the Bunny storage API key.
+.env
+.env.local
+.env.*.local
+application-local.properties

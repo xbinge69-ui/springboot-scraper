@@ -21,6 +21,14 @@ public sealed interface EnrichmentSource {
      */
     record LocalFile(Path path, long sizeBytes) implements EnrichmentSource {}
 
-    /** Source is a remote URL that still needs to be downloaded. */
-    record RemoteUrl(String url) implements EnrichmentSource {}
+    /**
+     * Source is a remote URL that still needs to be downloaded. The
+     * optional {@code referer} is sent as the {@code Referer} header
+     * (and {@code Origin} derived from it) to satisfy CDNs that require
+     * a same-origin referer (erome, doodstream, etc.). If null, the
+     * video URL's own origin is used.
+     */
+    record RemoteUrl(String url, String referer) implements EnrichmentSource {
+        public RemoteUrl(String url) { this(url, null); }
+    }
 }

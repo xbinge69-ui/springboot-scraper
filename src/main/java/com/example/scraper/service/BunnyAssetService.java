@@ -24,17 +24,29 @@ public class BunnyAssetService {
     @Value("${app.bunny.enabled:false}")
     private boolean bunnyEnabled;
 
-    @Value("${app.bunny.storage-zone:}")
-    private String storageZone;
+    @Value("${app.bunny.storage.zone-name:}")
+    private String storageZoneName;
 
-    @Value("${app.bunny.api-key:}")
-    private String apiKey;
+    /**
+     * Bunny storage API key. Sourced from the {@code BUNNY_STORAGE_API_KEY}
+     * environment variable (resolved via
+     * {@code @Value("${BUNNY_STORAGE_API_KEY:}")}). The default value is
+     * empty, so the key is never in source. The {@code @Value} is
+     * intentionally indirect (referencing the env var) so Spring's
+     * property binding can find it without the dev having to set
+     * {@code -DBUNNY_STORAGE_API_KEY=…} on the command line.
+     */
+    @Value("${app.bunny.storage.api-key:}")
+    private String storageApiKey;
+
+    @Value("${app.bunny.storage.endpoint:https://storage.bunnycdn.com}")
+    private String storageEndpoint;
 
     @Value("${app.bunny.storage-region:}")
     private String storageRegion;
 
-    @Value("${app.bunny.pull-base-url:https://example.b-cdn.net}")
-    private String pullBaseUrl;
+    @Value("${app.bunny.cdn.hostname:}")
+    private String cdnHostname;
 
     @Value("${app.bunny.folder:uploads}")
     private String folder;
@@ -84,20 +96,26 @@ public class BunnyAssetService {
     }
 
     private void ensureConfigured() {
-        if (storageZone.isBlank() || apiKey.isBlank()) {
-            throw new IllegalStateException("Bunny enabled but storage-zone/api-key are not configured.");
+        if (storageZoneName.isBlank() || storageApiKey.isBlank()) {
+            throw new IllegalStateException("Bunny enabled but storage zone-name/api-key are not configured.");
         }
     }
 
     private HttpURLConnection openConnection(String objectPath, String contentType) throws IOException {
-        String host = (storageRegion == null || storageRegion.isBlank())
-                ? "storage.bunnycdn.com"
-                : storageRegion + ".storage.bunnycdn.com";
-        URL url = new URL("https://" + host + "/" + storageZone + "/" + normalizeObjectPath(objectPath));
+        // PUT URL: {storage-endpoint}/{storage-zone-name}/{object-path}.
+        // Default endpoint is https://storage.bunnycdn.com; a regional edge
+        // (e.g. "ny") is prepended to .storage.bunnycdn.com.
+        String host = storageEndpoint;
+        if (host == null || host.isBlank()) {
+            host = (storageRegion == null || storageRegion.isBlank())
+                    ? "storage.bunnycdn.com"
+                    : storageRegion + ".storage.bunnycdn.com";
+        }
+        URL url = new URL(host + "/" + storageZoneName + "/" + normalizeObjectPath(objectPath));
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("PUT");
         conn.setDoOutput(true);
-        conn.setRequestProperty("AccessKey", apiKey);
+        conn.setRequestProperty("AccessKey", storageApiKey);
         conn.setRequestProperty("Content-Type", contentType);
         conn.setConnectTimeout(UPLOAD_CONNECT_TIMEOUT_MS);
         conn.setReadTimeout(UPLOAD_READ_TIMEOUT_MS);
@@ -113,7 +131,8 @@ public class BunnyAssetService {
     }
 
     private String publicUrlFor(String objectPath) {
-        return stripTrailingSlash(pullBaseUrl) + "/" + normalizeObjectPath(objectPath);
+        // Public read URL: https://{cdn-hostname}/{object-path}
+        return "https://" + stripTrailingSlash(cdnHostname) + "/" + normalizeObjectPath(objectPath);
     }
 
     private String normalizeObjectPath(String objectPath) {

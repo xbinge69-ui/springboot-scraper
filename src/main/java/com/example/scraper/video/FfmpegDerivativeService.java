@@ -153,7 +153,16 @@ public class FfmpegDerivativeService {
                 .setConstantRateFactor(props.getCompressedCrf())
                 .setVideoFilter(scaleFilter())
                 .setVideoMovFlags("+faststart")
-                .addExtraArgs("-preset", props.getCompressedPreset());
+                .addExtraArgs("-preset", props.getCompressedPreset())
+                // Modern ffmpeg (>=4.4) writes no color metadata by default.
+                // Players then assume "tv / limited range" (16-235) and clip
+                // the bright values → washed-out / over-saturated picture.
+                // Force BT.709 / tv-range on the output so it matches the
+                // common-web default and renders identically to the source.
+                .addExtraArgs("-color_range", "tv",
+                              "-colorspace", "bt709",
+                              "-color_primaries", "bt709",
+                              "-color_trc", "bt709");
         if (hasAudio) {
             o.setAudioCodec("aac").setAudioBitRate(128_000L);
         } else {
@@ -173,7 +182,12 @@ public class FfmpegDerivativeService {
                 .setConstantRateFactor(props.getPreviewCrf())
                 .setVideoFilter(scaleFilter())
                 .setVideoMovFlags("+faststart")
-                .addExtraArgs("-preset", props.getPreviewPreset());
+                .addExtraArgs("-preset", props.getPreviewPreset())
+                // See buildCompressedJob for why these matter.
+                .addExtraArgs("-color_range", "tv",
+                              "-colorspace", "bt709",
+                              "-color_primaries", "bt709",
+                              "-color_trc", "bt709");
         if (hasAudio) {
             o.setAudioCodec("aac").setAudioBitRate(64_000L);
         } else {

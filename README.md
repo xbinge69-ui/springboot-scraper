@@ -382,12 +382,15 @@ server.tomcat.connection-timeout=120s
 # --- Catalog ---
 app.catalog.videos-file=../src/data/videos.json   # relative to JVM CWD
 
-# --- Bunny CDN ---
-app.bunny.enabled=false                            # set to true to upload
-app.bunny.storage-zone=
-app.bunny.api-key=
-app.bunny.storage-region=
-app.bunny.pull-base-url=https://example.b-cdn.net
+# --- Bunny CDN (the only CDN — all derivatives go here) ---
+# The storage API key is sourced from the BUNNY_STORAGE_API_KEY
+# environment variable so it never lands in source. See `.env.example`.
+app.bunny.enabled=true
+app.bunny.storage.api-key=${BUNNY_STORAGE_API_KEY:}
+app.bunny.storage.zone-name=spankycouples
+app.bunny.storage.endpoint=https://storage.bunnycdn.com
+# app.bunny.storage-region=                        # regional edge, e.g. "ny"
+app.bunny.cdn.hostname=SpankyCouples6969.b-cdn.net
 app.bunny.folder=videos
 
 # --- Ollama ---
@@ -428,8 +431,12 @@ app.enrichment.sweeper-stale-minutes=60
 | `spring.servlet.multipart.max-file-size` | `2GB` | Max upload size |
 | `app.catalog.videos-file` | `../src/data/videos.json` | Where the catalog JSON is read/written |
 | `app.pipeline.mock-uploads` | `true` | (legacy, no longer used) |
-| `app.bunny.enabled` | `false` | If false, bunny "uploads" short-circuit and return a would-be public URL |
-| `app.bunny.storage-zone` / `api-key` / `storage-region` / `pull-base-url` | empty / `https://example.b-cdn.net` | Bunny credentials + CDN base |
+| `app.bunny.enabled` | `true` | Enable Bunny uploads (false short-circuits with mock URLs) |
+| `app.bunny.storage.api-key` | `${BUNNY_STORAGE_API_KEY:}` | Bunny storage API key (from env var) |
+| `app.bunny.storage.zone-name` | `spankycouples` | Bunny storage zone |
+| `app.bunny.storage.endpoint` | `https://storage.bunnycdn.com` | Upload PUT endpoint |
+| `app.bunny.cdn.hostname` | `SpankyCouples6969.b-cdn.net` | Public CDN hostname |
+| `app.bunny.folder` | `videos` | Folder prefix for all uploads |
 | `app.ollama.url` / `model` / `timeout-seconds` | `http://localhost:11434` / `mistral` / `120` | LLM endpoint |
 | `app.ffmpeg.path` / `app.ffprobe.path` | `ffmpeg` / `ffprobe` | Must resolve on `PATH` |
 | `app.ffmpeg.target-max-width/height` | `1280` / `720` | Cap applied to compressed + preview |
@@ -598,7 +605,7 @@ These are documented in the project plan (`plans/`) and flagged for follow-up:
 
 ### Bunny CDN upload fails with non-2xx
 **Cause:** API key/zone wrong, or quota exceeded.  
-**Fix:** Verify `app.bunny.*` properties. With `app.bunny.enabled=false`, uploads short-circuit and return mock URLs — useful for local dev.
+**Fix:** Verify `BUNNY_STORAGE_API_KEY` env var is set and `app.bunny.storage.zone-name` matches. With `app.bunny.enabled=false`, uploads short-circuit and return mock URLs — useful for local dev without a real key.
 
 ### Spring DevTools keeps reloading mid-encode
 **Cause:** Auto-restart triggered by some file change.  
@@ -627,4 +634,4 @@ For issues and questions:
 
 ---
 
-**Last Updated:** June 4, 2026 (rev: removed Doodstream/Vidara, Bunny-only)
+**Last Updated:** June 4, 2026 (rev: color metadata on ffmpeg output, real Bunny CDN)

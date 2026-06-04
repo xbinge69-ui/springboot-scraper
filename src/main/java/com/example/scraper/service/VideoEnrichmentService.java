@@ -138,7 +138,8 @@ public class VideoEnrichmentService {
             } else if (source instanceof EnrichmentSource.RemoteUrl ru) {
                 Path dest = tempDir.resolve("input.bin");
                 HttpVideoDownloader.download(ru.url(), dest, maxDownloadBytes,
-                        downloadConnectSeconds * 1000, downloadReadSeconds * 1000);
+                        downloadConnectSeconds * 1000, downloadReadSeconds * 1000,
+                        ru.referer());
                 inputPath = dest;
             } else {
                 throw new IllegalArgumentException("Unknown EnrichmentSource: " + source);

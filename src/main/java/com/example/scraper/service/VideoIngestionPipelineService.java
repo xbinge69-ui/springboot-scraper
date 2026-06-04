@@ -53,7 +53,9 @@ public class VideoIngestionPipelineService {
                 request.getUnknownActressName(),
                 request.getActressId());
 
-        return videoEnrichmentService.enrich(new EnrichmentSource.RemoteUrl(sourceVideoUrl), meta);
+        return videoEnrichmentService.enrich(
+                new EnrichmentSource.RemoteUrl(sourceVideoUrl, request.getSourcePageUrl()),
+                meta);
     }
 
     private void validateRequest(PipelineRequest request) {
