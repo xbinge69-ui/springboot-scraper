@@ -544,7 +544,93 @@ All three derivatives (thumbnail/preview/compressed) go to Bunny CDN as separate
 2. **Rate limiting** — per-IP rate limits on the enrichment endpoint (it does ~10-30s of CPU work per request).
 3. **Reverse proxy timeouts** — the enrichment request takes ~70s end-to-end. Configure your reverse proxy (`nginx`, Cloudflare) to allow 100-120s upstream timeouts.
 4. **TLS** — run behind HTTPS in production; the cookie/session model is currently insecure for any non-localhost use.
-5. **Secrets** — store Bunny API key, Ollama URL, etc. in environment variables rather than the properties file.
+5. **Secrets** — store Bunny API key, Ollama URL, etc. in environment variables rather than the properties file. See [Deployment](#deployment) below for the production setup.
+
+---
+
+## 🚀 Deployment
+
+The repo is safe to clone and push — `.env` is in `.gitignore`, so the Bunny
+storage API key never leaves the operator's local machine or the server.
+
+### 1. Clone & build on the server
+
+```bash
+git clone <repo-url> springboot-scraper
+cd springboot-scraper
+./mvnw clean package -DskipTests
+```
+
+### 2. Create the `.env` on the server with the real key
+
+```bash
+cp .env.example .env
+nano .env                # paste the real Bunny key + any other secrets
+chmod 600 .env          # lock to read-only-for-owner
+ls -la .env             # → -rw-------  1 you  you  ...  .env
+```
+
+Verify the file is locked down and ignored by git:
+
+```bash
+git check-ignore .env  # → .env
+git status --ignored   # → .env under "Ignored files"
+```
+
+### 3. Run via systemd (recommended)
+
+```ini
+# /etc/systemd/system/scraper.service
+[Unit]
+Description=Spring Boot Scraper
+After=network.target
+
+[Service]
+Type=simple
+User=scraper
+WorkingDirectory=/opt/springboot-scraper
+EnvironmentFile=/opt/springboot-scraper/.env
+ExecStart=/usr/bin/java -jar /opt/springboot-scraper/target/scraper-0.0.1-SNAPSHOT.jar
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo useradd -r -s /bin/false scraper
+sudo chown -R scraper:scraper /opt/springboot-scraper
+sudo chmod 600 /opt/springboot-scraper/.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now scraper
+sudo systemctl status scraper
+```
+
+`EnvironmentFile=/opt/springboot-scraper/.env` injects `BUNNY_STORAGE_API_KEY`
+(and any other vars) into the JVM's environment before Java starts. The
+service runs as the unprivileged `scraper` user; only that user can read
+the file. systemd is the only thing that knows the key — your shell history,
+the JVM's command line, and the rest of the filesystem don't.
+
+### 4. Verify in production
+
+```bash
+curl -s http://localhost:8080/api/video/enrich \
+  -F "title=Smoke" -F "videoFile=@/tmp/x.mp4" | jq .entry.thumbnailKey
+```
+
+A URL on `SpankyCouples6969.b-cdn.net/...` means the key made it through
+and a real upload happened.
+
+### 5. Higher-security alternatives
+
+For a more robust deployment, replace the flat `.env` with a secrets
+manager (HashiCorp Vault, AWS Secrets Manager, Doppler, sops + age, etc.)
+and have systemd read the env var from there via `EnvironmentFile=` or
+a generator script. The application code does not need to change — it
+only reads from the environment, so swapping the secret source is
+invisible to Spring.
 
 ---
 
@@ -634,4 +720,4 @@ For issues and questions:
 
 ---
 
-**Last Updated:** June 4, 2026 (rev: color metadata on ffmpeg output, real Bunny CDN)
+**Last Updated:** June 4, 2026 (rev: colorspace filter chain for pixel-perfect color preservation)

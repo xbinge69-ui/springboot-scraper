@@ -138,11 +138,31 @@ public class FfmpegDerivativeService {
 
     // -------- package-private builders (reusable from tests) --------
 
-    /** Filter string for compressed + preview. Caps to 1280x720, never upscales. */
+    /**
+     * Filter string for compressed + preview. Caps to 1280x720, never upscales.
+     *
+     * <p><b>Color policy:</b> the goal is pixel-perfect preservation of the
+     * source. We do not run a color matrix conversion, we do not run a
+     * range conversion. The only thing we do is set the OUTPUT
+     * colorimetry to BT.709 / pc via {@code out_color_matrix=bt709}
+     * and {@code out_range=pc} on the scale filter, which tells ffmpeg
+     * "the bytes you emit are BT.709 full-range" without forcing it to
+     * reinterpret the source. This means the input is auto-detected
+     * (or passed through untouched if the source is already BT.709).
+     *
+     * <p>Earlier iterations wrapped a {@code colorspace=iall=bt709:all=bt709}
+     * filter in the chain, but that filter is itself known to introduce
+     * subtle saturation in some sources. Dropping it and letting
+     * {@code out_color_matrix} do the work is the most minimal
+     * intervention that still tags the output correctly.
+     */
     String scaleFilter() {
         return "scale=w='min(iw," + props.getTargetMaxWidth() + ")':h='min(ih,"
-                + props.getTargetMaxHeight() + ")':force_original_aspect_ratio=decrease,"
-                + "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+                + props.getTargetMaxHeight() + ")':force_original_aspect_ratio=decrease"
+                + ":flags=lanczos:out_color_matrix=bt709:out_range=pc,"
+                + "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+                + ":flags=lanczos:out_color_matrix=bt709:out_range=pc,"
+                + "format=yuv420p";
     }
 
     FFmpegBuilder buildCompressedJob(Path input, Path output, boolean hasAudio) {
@@ -157,9 +177,9 @@ public class FfmpegDerivativeService {
                 // Modern ffmpeg (>=4.4) writes no color metadata by default.
                 // Players then assume "tv / limited range" (16-235) and clip
                 // the bright values → washed-out / over-saturated picture.
-                // Force BT.709 / tv-range on the output so it matches the
-                // common-web default and renders identically to the source.
-                .addExtraArgs("-color_range", "tv",
+                // Force BT.709 / pc (full) range on the output so it matches
+                // the common-web default and renders identically to the source.
+                .addExtraArgs("-color_range", "pc",
                               "-colorspace", "bt709",
                               "-color_primaries", "bt709",
                               "-color_trc", "bt709");
@@ -184,7 +204,7 @@ public class FfmpegDerivativeService {
                 .setVideoMovFlags("+faststart")
                 .addExtraArgs("-preset", props.getPreviewPreset())
                 // See buildCompressedJob for why these matter.
-                .addExtraArgs("-color_range", "tv",
+                .addExtraArgs("-color_range", "pc",
                               "-colorspace", "bt709",
                               "-color_primaries", "bt709",
                               "-color_trc", "bt709");
