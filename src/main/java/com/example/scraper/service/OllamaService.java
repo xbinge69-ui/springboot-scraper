@@ -1,5 +1,6 @@
 package com.example.scraper.service;
 
+import com.example.scraper.service.llm.LlmProvider;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,7 +17,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @Service
-public class OllamaService {
+public class OllamaService implements LlmProvider {
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -39,6 +40,9 @@ public class OllamaService {
         this.objectMapper = new ObjectMapper();
     }
 
+    @Override
+    public String name() { return "ollama"; }
+
     /**
      * Generate text using the Ollama model via HTTP REST API.
      *
@@ -54,6 +58,7 @@ public class OllamaService {
      * Generate text with model-options (e.g. {@code format=json},
      * {@code temperature=0.2}) injected into the Ollama request body.
      */
+    @Override
     public String generate(String prompt, Map<String, Object> options) throws Exception {
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("model", modelName);
@@ -95,6 +100,11 @@ public class OllamaService {
      *
      * @return true if Ollama API responds
      */
+    @Override
+    public boolean isAvailable() {
+        return isOllamaAvailable();
+    }
+
     public boolean isOllamaAvailable() {
         try {
             String response = restTemplate.getForObject(ollamaUrl + "/api/tags", String.class);
@@ -116,3 +126,4 @@ public class OllamaService {
         return timeoutSeconds;
     }
 }
+

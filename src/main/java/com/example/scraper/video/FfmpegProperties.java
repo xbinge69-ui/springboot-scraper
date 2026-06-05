@@ -29,6 +29,17 @@ public class FfmpegProperties {
     private final int compressedCrf;
     private final String compressedPreset;
     private final int thumbnailQuality;
+    // Watermark
+    private final String watermarkText;
+    private final int watermarkFontSizeMain;
+    private final int watermarkFontSizeClip;
+    private final double watermarkOpacity;
+    private final String watermarkBoxColor;
+    private final int watermarkBoxBorder;
+    private final int watermarkMargin;
+    // Preview clips (5×25s)
+    private final int previewClipSeconds;
+    private final double[] previewClipPositions;
 
     public FfmpegProperties(
             @Value("${app.ffmpeg.path:ffmpeg}") String ffmpegPath,
@@ -42,7 +53,16 @@ public class FfmpegProperties {
             @Value("${app.ffmpeg.preview-preset:fast}") String previewPreset,
             @Value("${app.ffmpeg.compressed-crf:23}") int compressedCrf,
             @Value("${app.ffmpeg.compressed-preset:medium}") String compressedPreset,
-            @Value("${app.ffmpeg.thumbnail-quality:2}") int thumbnailQuality) {
+            @Value("${app.ffmpeg.thumbnail-quality:2}") int thumbnailQuality,
+            @Value("${app.ffmpeg.watermark.text:Spankycouples.com}") String watermarkText,
+            @Value("${app.ffmpeg.watermark.font-size-main:18}") int watermarkFontSizeMain,
+            @Value("${app.ffmpeg.watermark.font-size-clip:24}") int watermarkFontSizeClip,
+            @Value("${app.ffmpeg.watermark.opacity:0.85}") double watermarkOpacity,
+            @Value("${app.ffmpeg.watermark.box-color:black@0.4}") String watermarkBoxColor,
+            @Value("${app.ffmpeg.watermark.box-border:6}") int watermarkBoxBorder,
+            @Value("${app.ffmpeg.watermark.margin:12}") int watermarkMargin,
+            @Value("${app.ffmpeg.preview-clip-seconds:25}") int previewClipSeconds,
+            @Value("${app.ffmpeg.preview-clip-positions:0.05,0.35,0.50,0.65,0.95}") double[] previewClipPositions) {
         this.ffmpegPath = ffmpegPath;
         this.ffprobePath = ffprobePath;
         this.previewDurationSeconds = previewDurationSeconds;
@@ -55,6 +75,17 @@ public class FfmpegProperties {
         this.compressedCrf = compressedCrf;
         this.compressedPreset = compressedPreset;
         this.thumbnailQuality = thumbnailQuality;
+        this.watermarkText = watermarkText == null ? "" : watermarkText;
+        this.watermarkFontSizeMain = watermarkFontSizeMain;
+        this.watermarkFontSizeClip = watermarkFontSizeClip;
+        this.watermarkOpacity = watermarkOpacity;
+        this.watermarkBoxColor = watermarkBoxColor == null ? "black@0.4" : watermarkBoxColor;
+        this.watermarkBoxBorder = watermarkBoxBorder;
+        this.watermarkMargin = watermarkMargin;
+        this.previewClipSeconds = previewClipSeconds;
+        this.previewClipPositions = previewClipPositions == null || previewClipPositions.length == 0
+                ? new double[]{0.05, 0.35, 0.50, 0.65, 0.95}
+                : previewClipPositions;
     }
 
     public String getFfmpegPath() { return ffmpegPath; }
@@ -69,4 +100,13 @@ public class FfmpegProperties {
     public int getCompressedCrf() { return compressedCrf; }
     public String getCompressedPreset() { return compressedPreset; }
     public int getThumbnailQuality() { return thumbnailQuality; }
+    public String getWatermarkText() { return watermarkText; }
+    public int getWatermarkFontSizeMain() { return watermarkFontSizeMain; }
+    public int getWatermarkFontSizeClip() { return watermarkFontSizeClip; }
+    public double getWatermarkOpacity() { return watermarkOpacity; }
+    public String getWatermarkBoxColor() { return watermarkBoxColor; }
+    public int getWatermarkBoxBorder() { return watermarkBoxBorder; }
+    public int getWatermarkMargin() { return watermarkMargin; }
+    public int getPreviewClipSeconds() { return previewClipSeconds; }
+    public double[] getPreviewClipPositions() { return previewClipPositions; }
 }

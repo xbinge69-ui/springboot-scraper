@@ -90,7 +90,11 @@ class FfmpegDerivativeServiceTest {
                 1280, 720,
                 28, "fast",
                 23, "medium",
-                2);
+                2,
+                "Spankycouples.com",
+                18, 24, 0.85,
+                "black@0.4", 6, 12,
+                25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95});
         FFmpeg ffmpeg = new FFmpeg(props.getFfmpegPath());
         ffprobe = new FFprobe(props.getFfprobePath());
         service = new FfmpegDerivativeService(props, ffmpeg, ffprobe);

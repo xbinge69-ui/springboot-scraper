@@ -8,6 +8,7 @@ import com.example.scraper.video.EnrichmentSource;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,6 +34,19 @@ public class VideoIngestionPipelineService {
     }
 
     public PipelineOutcome ingestFromPageUrl(PipelineRequest request) throws IOException {
+        return ingestFromPageUrl(request, null, null);
+    }
+
+    /**
+     * Async-friendly variant. When {@code job} and {@code previewsDir} are
+     * non-null, the enrich step emits progress to the job and writes
+     * the 5 watermark-baked preview clips into the per-job dir (which
+     * the controller's caller is responsible for cleaning up via
+     * {@link PipelineJobService#cleanup(String)}).
+     */
+    public PipelineOutcome ingestFromPageUrl(PipelineRequest request,
+                                             com.example.scraper.model.PipelineJob job,
+                                             Path previewsDir) throws IOException {
         validateRequest(request);
 
         VideoResult scraped = videoScraperService.extractVideos(request.getSourcePageUrl());
@@ -55,7 +69,10 @@ public class VideoIngestionPipelineService {
 
         return videoEnrichmentService.enrich(
                 new EnrichmentSource.RemoteUrl(sourceVideoUrl, request.getSourcePageUrl()),
-                meta);
+                meta,
+                Boolean.TRUE.equals(request.getUseMinimax()),
+                job,
+                previewsDir);
     }
 
     private void validateRequest(PipelineRequest request) {

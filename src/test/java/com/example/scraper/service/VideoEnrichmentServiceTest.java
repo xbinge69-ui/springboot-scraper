@@ -98,7 +98,10 @@ class VideoEnrichmentServiceTest {
 
         FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
                 new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
-                        28, "fast", 23, "medium", 2));
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenReturn("""
@@ -116,7 +119,7 @@ class VideoEnrichmentServiceTest {
         });
 
         VideoEnrichmentService service = new VideoEnrichmentService(
-                ffmpeg, bunny, ollama, catalog,
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
                 /*ffmpegTimeout*/ 120,
                 /*maxDownloadBytes*/ 50_000_000L,
                 /*downloadConnectSeconds*/ 5,
@@ -134,7 +137,7 @@ class VideoEnrichmentServiceTest {
         long inputSize = Files.size(input);
         PipelineOutcome outcome = service.enrich(
                 new EnrichmentSource.LocalFile(input, inputSize),
-                meta);
+                meta, false);
 
         // ---- response ----
         VideoCatalogEntry entry = outcome.getEntry();
@@ -183,7 +186,10 @@ class VideoEnrichmentServiceTest {
 
         FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
                 new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
-                        28, "fast", 23, "medium", 2));
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenThrow(new RuntimeException("Ollama offline"));
@@ -194,7 +200,7 @@ class VideoEnrichmentServiceTest {
                 "https://cdn.example/" + inv.getArgument(1));
 
         VideoEnrichmentService service = new VideoEnrichmentService(
-                ffmpeg, bunny, ollama, catalog,
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
                 120, 50_000_000L, 5, 30, 60, "json", 0.2);
 
         EnrichmentMetadata meta = new EnrichmentMetadata(
@@ -205,7 +211,7 @@ class VideoEnrichmentServiceTest {
         Path input = fixtureAsInput();
         PipelineOutcome outcome = service.enrich(
                 new EnrichmentSource.LocalFile(input, Files.size(input)),
-                meta);
+                meta, false);
 
         VideoCatalogEntry entry = outcome.getEntry();
         assertThat(entry.getTitle()).isEqualTo("Fallback Title");
@@ -227,7 +233,10 @@ class VideoEnrichmentServiceTest {
 
         FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
                 new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
-                        28, "fast", 23, "medium", 2));
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenReturn("{}");
@@ -238,14 +247,14 @@ class VideoEnrichmentServiceTest {
                 .thenThrow(new IOException("Bunny unreachable"));
 
         VideoEnrichmentService service = new VideoEnrichmentService(
-                ffmpeg, bunny, ollama, catalog,
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
                 120, 50_000_000L, 5, 30, 60, "json", 0.2);
 
         EnrichmentMetadata meta = new EnrichmentMetadata("Test", null, null, null, null, null);
         Path input = fixtureAsInput();
 
         assertThatThrownBy(() -> service.enrich(
-                new EnrichmentSource.LocalFile(input, Files.size(input)), meta))
+                new EnrichmentSource.LocalFile(input, Files.size(input)), meta, false))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("bunny upload failed");
 

@@ -15,6 +15,9 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -49,18 +52,47 @@ public class FfmpegDerivativeService {
     private final FFmpeg ffmpeg;
     private final FFprobe ffprobe;
     private final FfmpegProperties props;
+    private final WatermarkFontService watermarkFont;
 
     /** Spring constructor — resolves ffmpeg/ffprobe via the configured paths. */
     @Autowired
-    public FfmpegDerivativeService(FfmpegProperties props) throws IOException {
-        this(props, new FFmpeg(props.getFfmpegPath()), new FFprobe(props.getFfprobePath()));
+    public FfmpegDerivativeService(FfmpegProperties props, WatermarkFontService watermarkFont) throws IOException {
+        this(props, watermarkFont, new FFmpeg(props.getFfmpegPath()), new FFprobe(props.getFfprobePath()));
     }
 
     /** Test constructor — caller supplies pre-built bramp objects. */
-    public FfmpegDerivativeService(FfmpegProperties props, FFmpeg ffmpeg, FFprobe ffprobe) {
+    public FfmpegDerivativeService(FfmpegProperties props, WatermarkFontService watermarkFont,
+                                   FFmpeg ffmpeg, FFprobe ffprobe) {
         this.props = props;
+        this.watermarkFont = watermarkFont;
         this.ffmpeg = ffmpeg;
         this.ffprobe = ffprobe;
+    }
+
+    /**
+     * Backwards-compatible test constructor — no font service. Tests that
+     * don't care about watermarks can keep using the 3-arg signature.
+     * Internally wraps {@code null} in a stub font service that resolves
+     * to "no font" so the filter chain degrades to a plain scale filter.
+     */
+    public FfmpegDerivativeService(FfmpegProperties props, FFmpeg ffmpeg, FFprobe ffprobe) {
+        this(props, new NoOpWatermarkFontService(), ffmpeg, ffprobe);
+    }
+
+    /**
+     * Backwards-compatible test constructor — only properties. The
+     * FFmpeg/FFprobe wrappers are constructed from the configured paths
+     * (which will throw at construction time on machines without ffmpeg,
+     * matching the legacy behavior).
+     */
+    public FfmpegDerivativeService(FfmpegProperties props) throws IOException {
+        this(props, new NoOpWatermarkFontService(), new FFmpeg(props.getFfmpegPath()), new FFprobe(props.getFfprobePath()));
+    }
+
+    /** No-op font service for tests that want plain scale-filter output. */
+    private static final class NoOpWatermarkFontService extends WatermarkFontService {
+        NoOpWatermarkFontService() { super("", ""); }
+        @Override public Optional<Path> resolveFontPath() { return Optional.empty(); }
     }
 
     /**
@@ -165,13 +197,60 @@ public class FfmpegDerivativeService {
                 + "format=yuv420p";
     }
 
+    /**
+     * Same as {@link #scaleFilter()} but with a {@code drawtext} filter
+     * appended that bakes the watermark into the top-right corner. If
+     * no font is available, returns the plain scale chain (so the
+     * pipeline degrades gracefully — the watermark just doesn't appear).
+     */
+    String scaleFilterWithWatermark(int fontSize) {
+        String base = scaleFilter();
+        Optional<Path> font = watermarkFont.resolveFontPath();
+        if (font.isEmpty() || props.getWatermarkText().isBlank()) {
+            return base;
+        }
+        // ffmpeg filter escaping: ":" is an option separator, "'" ends a quoted
+        // segment. Our text is alphanumeric + a dot so the only thing to worry
+        // about on the fontfile path is the colon (Windows C:\...) and the
+        // backslash (Windows path separator).
+        String text = escapeForDrawtext(props.getWatermarkText());
+        String fontPath = escapeForDrawtext(font.get().toString());
+        return base + ",drawtext=fontfile='" + fontPath
+                + "':text='" + text + "'"
+                + ":fontcolor=white@" + props.getWatermarkOpacity()
+                + ":fontsize=" + fontSize
+                + ":x=w-tw-" + props.getWatermarkMargin()
+                + ":y=" + props.getWatermarkMargin()
+                + ":box=1:boxcolor=" + props.getWatermarkBoxColor()
+                + ":boxborderw=" + props.getWatermarkBoxBorder();
+    }
+
+    /** Escape characters that have special meaning inside an ffmpeg drawtext value. */
+    static String escapeForDrawtext(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case ':' -> sb.append("\\:");
+                case '\\' -> sb.append("\\\\");
+                case '\'' -> sb.append("\\'");
+                case '%' -> sb.append("\\%");
+                case '[' -> sb.append("\\[");
+                case ']' -> sb.append("\\]");
+                default -> sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     FFmpegBuilder buildCompressedJob(Path input, Path output, boolean hasAudio) {
         FFmpegBuilder b = new FFmpegBuilder().overrideOutputFiles(true);
         b.setInput(input.toString());  // input side; no seek
         FFmpegOutputBuilder o = b.addOutput(output.toString())
                 .setVideoCodec("libx264")
                 .setConstantRateFactor(props.getCompressedCrf())
-                .setVideoFilter(scaleFilter())
+                .setVideoFilter(scaleFilterWithWatermark(props.getWatermarkFontSizeMain()))
                 .setVideoMovFlags("+faststart")
                 .addExtraArgs("-preset", props.getCompressedPreset())
                 // Modern ffmpeg (>=4.4) writes no color metadata by default.
@@ -226,6 +305,64 @@ public class FfmpegDerivativeService {
         return b;
     }
 
+    /**
+     * Build an FFmpeg job for one of the 5 watermark-baked 25s preview clips.
+     * Filter chain is the same as the 5s preview + drawtext watermark.
+     */
+    FFmpegBuilder buildClipJob(Path input, Path output,
+                               double startSec, double durationSec, boolean hasAudio) {
+        FFmpegBuilder b = new FFmpegBuilder().overrideOutputFiles(true);
+        b.setInput(input.toString())
+                .setStartOffset((long) (startSec * 1000d), TimeUnit.MILLISECONDS);
+        FFmpegOutputBuilder o = b.addOutput(output.toString())
+                .setDuration((long) (durationSec * 1000d), TimeUnit.MILLISECONDS)
+                .setVideoCodec("libx264")
+                .setConstantRateFactor(props.getPreviewCrf())
+                .setVideoFilter(scaleFilterWithWatermark(props.getWatermarkFontSizeClip()))
+                .setVideoMovFlags("+faststart")
+                .addExtraArgs("-preset", props.getPreviewPreset())
+                .addExtraArgs("-color_range", "pc",
+                              "-colorspace", "bt709",
+                              "-color_primaries", "bt709",
+                              "-color_trc", "bt709");
+        if (hasAudio) {
+            o.setAudioCodec("aac").setAudioBitRate(64_000L);
+        } else {
+            o.disableAudio();
+        }
+        return b;
+    }
+
+    /**
+     * Generate the 5 watermark-baked preview clips and return their paths.
+     *
+     * <p>Positions default to {@code 0.05, 0.35, 0.50, 0.65, 0.95} of the
+     * source duration — 1 from the start, 3 from the middle, 1 from the
+     * end. Each clip is exactly {@code app.ffmpeg.preview-clip-seconds}
+     * (default 25) long, clamped to fit inside the source.
+     */
+    public List<Path> generatePreviewClips(Path input, Path outputDir, String baseName,
+                                           VideoMetadata meta, boolean hasAudio) throws IOException {
+        Files.createDirectories(outputDir);
+        double[] positions = props.getPreviewClipPositions();
+        int clipDur = props.getPreviewClipSeconds();
+        List<Path> out = new ArrayList<>(positions.length);
+        for (int i = 0; i < positions.length; i++) {
+            double startSec = clampToDuration(meta.durationSeconds() * positions[i],
+                                               meta.durationSeconds());
+            double actualDur = Math.max(0.5d, Math.min(clipDur,
+                    Math.max(0d, meta.durationSeconds() - startSec)));
+            Path clipPath = outputDir.resolve(baseName + ".clip" + (i + 1) + ".mp4");
+            log.info("ffmpeg clip {} start: input={}, baseName={}, start={}s, dur={}s",
+                    i + 1, input, baseName,
+                    String.format("%.2f", startSec), String.format("%.2f", actualDur));
+            runClip(input, clipPath, startSec, actualDur, hasAudio);
+            log.info("ffmpeg clip {} done: {}", i + 1, clipPath);
+            out.add(clipPath);
+        }
+        return out;
+    }
+
     // -------- private runners --------
 
     private void runCompressed(Path input, Path output, boolean hasAudio) throws IOException {
@@ -259,6 +396,17 @@ public class FfmpegDerivativeService {
             throw new IOException("ffmpeg thumbnail failed for " + input + " -> " + output, e);
         }
         log.info("ffmpeg thumbnail done: {} ({} ms)", output, System.currentTimeMillis() - t0);
+    }
+
+    private void runClip(Path input, Path output, double startSec, double durationSec, boolean hasAudio) throws IOException {
+        log.info("ffmpeg clip start: {}", output);
+        long t0 = System.currentTimeMillis();
+        try {
+            ffmpeg.run(buildClipJob(input, output, startSec, durationSec, hasAudio));
+        } catch (Exception e) {
+            throw new IOException("ffmpeg clip failed for " + input + " -> " + output, e);
+        }
+        log.info("ffmpeg clip done: {} ({} ms)", output, System.currentTimeMillis() - t0);
     }
 
     /**

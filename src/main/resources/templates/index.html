@@ -1,28 +1,144 @@
 <!DOCTYPE html>
-<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>Web Scraper</title>
+    <title>Scraper Dashboard</title>
     <style>
-        body { font-family: sans-serif; max-width: 700px; margin: 60px auto; padding: 0 1rem; }
-        h1 { color: #333; }
-        form { display: flex; gap: .5rem; flex-wrap: wrap; }
-        input[type=url] { flex: 1; padding: .6rem; border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; }
-        button { padding: .6rem 1.2rem; background: #0077cc; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
-        button:hover { background: #005fa3; }
-        .error { color: #c00; margin-top: 1rem; }
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-2: #273449;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            min-height: 100vh;
+            padding: 2rem 1rem;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        header { margin-bottom: 2rem; text-align: center; }
+        header h1 { font-size: 2.2rem; margin: 0 0 .4rem; }
+        header p { color: var(--muted); margin: 0; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.2rem;
+        }
+        .card {
+            background: var(--panel);
+            border-radius: 12px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid transparent;
+            transition: transform .15s ease, border-color .15s ease, background .15s ease;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent);
+            background: var(--panel-2);
+        }
+        .card .icon {
+            font-size: 2rem;
+            margin-bottom: .6rem;
+        }
+        .card h2 {
+            margin: 0 0 .5rem;
+            font-size: 1.15rem;
+        }
+        .card p {
+            color: var(--muted);
+            font-size: .9rem;
+            margin: 0 0 1.2rem;
+            flex: 1;
+        }
+        .card a.btn {
+            display: inline-block;
+            text-align: center;
+            background: var(--accent);
+            color: #fff;
+            text-decoration: none;
+            padding: .65rem 1rem;
+            border-radius: 6px;
+            font-weight: 600;
+            transition: background .15s ease;
+        }
+        .card a.btn:hover { background: var(--accent-hover); }
+        .card a.btn.alt { background: var(--warn); }
+        .card a.btn.alt:hover { background: #d97706; }
+        .card a.btn.danger { background: var(--danger); }
+        .card a.btn.danger:hover { background: #dc2626; }
+        .card a.btn.success { background: var(--success); }
+        .card a.btn.success:hover { background: #059669; }
+        .error {
+            color: #fecaca;
+            background: rgba(239, 68, 68, .15);
+            padding: .8rem 1rem;
+            border-radius: 6px;
+            margin-top: 1rem;
+        }
     </style>
 </head>
 <body>
-    <h1>Web Scraper</h1>
-    <p>Entrez une URL pour extraire tous les liens de la page. | <a th:href="@{/video}">Extracteur de vidéos →</a></p>
+<div class="container">
+    <header>
+        <h1>🛠️ Scraper Dashboard</h1>
+        <p>Pick a tool below to get started.</p>
+    </header>
 
-    <form method="post" th:action="@{/scrape}">
-        <input type="url" name="url" placeholder="https://example.com" required/>
-        <button type="submit">Scraper</button>
-    </form>
+    <div class="grid">
+        <div class="card">
+            <div class="icon">🔗</div>
+            <h2>Link Scraper</h2>
+            <p>Scrape any page and extract every anchor link with its text and title attribute.</p>
+            <form method="post" th:action="@{/scrape}" style="display:flex; gap:.4rem; flex-wrap:wrap;">
+                <input type="url" name="url" placeholder="https://example.com" required
+                       style="flex:1; min-width:0; padding:.55rem; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;"/>
+                <button type="submit" class="btn" style="border:none; cursor:pointer;">Go</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="icon">🎬</div>
+            <h2>Video Extractor</h2>
+            <p>Extract direct video URLs (mp4, m3u8, webm) from a supported page.</p>
+            <a class="btn" th:href="@{/video}">Open</a>
+        </div>
+
+        <div class="card">
+            <div class="icon">🚀</div>
+            <h2>Video Pipeline</h2>
+            <p>Scrape info from a page, download, enrich, and append a catalog entry to Bunny CDN + videos.json.</p>
+            <a class="btn success" th:href="@{/video/pipeline}">Open</a>
+        </div>
+
+        <div class="card">
+            <div class="icon">📦</div>
+            <h2>Batch Pipeline</h2>
+            <p>Process many URLs at once. Info is grabbed automatically for each, then the full pipeline runs.</p>
+            <a class="btn alt" th:href="@{/video/pipeline/batch}">Open</a>
+        </div>
+
+        <div class="card">
+            <div class="icon">📤</div>
+            <h2>Direct Upload</h2>
+            <p>Upload a local video file with metadata. Title is required, other fields are optional.</p>
+            <a class="btn danger" th:href="@{/video/upload}">Open</a>
+        </div>
+    </div>
 
     <p class="error" th:if="${error}" th:text="${error}"></p>
+</div>
 </body>
 </html>

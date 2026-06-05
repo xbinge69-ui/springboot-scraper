@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Batch Video Pipeline</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel-2: #273449;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #f59e0b;
+            --accent-hover: #d97706;
+            --success: #10b981;
+            --error: #ef4444;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            min-height: 100vh;
+            padding: 2rem 1rem;
+        }
+        .container { max-width: 980px; margin: 0 auto; }
+        .nav { margin-bottom: 1.5rem; }
+        .nav a { color: var(--accent); text-decoration: none; margin-right: 1rem; font-size: .9rem; }
+        .nav a:hover { text-decoration: underline; }
+        h1 { margin: 0 0 .3rem; }
+        p { color: var(--muted); }
+        .section { background: var(--panel); border-radius: 10px; padding: 1.4rem 1.6rem; margin-top: 1.4rem; }
+        .section h2 { margin: 0 0 .2rem; font-size: 1.15rem; }
+        .section .sub { color: var(--muted); font-size: .85rem; margin: 0 0 1rem; }
+        label { display: block; margin-top: .8rem; font-weight: 600; font-size: .9rem; }
+        textarea, input {
+            width: 100%;
+            padding: .6rem;
+            border-radius: 6px;
+            border: 1px solid #334155;
+            background: #0f172a;
+            color: var(--text);
+            font-size: .95rem;
+            font-family: inherit;
+        }
+        textarea { min-height: 200px; resize: vertical; }
+        .btn {
+            margin-top: 1rem;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: .8rem 1.4rem;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .btn:hover { background: var(--accent-hover); }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+        .error { color: #fecaca; background: rgba(239, 68, 68, .15); padding: .6rem .8rem; border-radius: 6px; margin-top: .7rem; }
+        .success { color: #bbf7d0; background: rgba(16, 185, 129, .15); padding: .6rem .8rem; border-radius: 6px; margin-top: .7rem; }
+        pre {
+            margin-top: 1rem;
+            background: #0b1220;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 1rem;
+            overflow: auto;
+            max-height: 600px;
+            font-size: .8rem;
+            white-space: pre;
+        }
+        .progress-wrap { margin-top: 1rem; display: none; }
+        .progress-bar { width: 100%; height: 22px; background: #0b1220; border-radius: 6px; overflow: hidden; border: 1px solid #334155; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #fbbf24); width: 0%; transition: width .3s ease; }
+        .progress-text { font-size: .85rem; color: var(--muted); margin-top: .4rem; min-height: 1.2em; }
+        .hint { font-size: .85rem; color: var(--muted); }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="nav">
+        <a th:href="@{/}">← Dashboard</a>
+        <a th:href="@{/video/pipeline}">Single Pipeline</a>
+        <a th:href="@{/video}">Video Extractor</a>
+    </div>
+
+    <h1>📦 Batch Video Pipeline</h1>
+    <p>Paste many source page URLs (one per line). For each one we <strong>auto-grab info</strong> and run the full ingestion pipeline (with watermark). The result is a list of catalog JSONs separated by a comma.</p>
+    <p class="hint">Only use this workflow for content you are authorized to process.</p>
+
+    <div class="section">
+        <h2>URLs</h2>
+        <p class="sub">One URL per line. Empty lines and duplicates are ignored.</p>
+
+        <label for="urls">Source page URLs (one per line) *</label>
+        <textarea id="urls" placeholder="https://www.erome.com/a/xxxx
+https://www.erome.com/a/yyyy
+https://www.erome.com/a/zzzz"></textarea>
+
+        <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
+            <label style="display:flex; align-items:center; gap:.5rem; margin:0; font-weight:600; cursor:pointer;">
+                <input id="useMinimax" type="checkbox" style="width:auto;"/>
+                <span>🧠 Use MiniMax for the Topical Authority LLM pass (overrides local Ollama for this batch)</span>
+            </label>
+            <p id="llmStatus" class="hint" style="margin:.4rem 0 0;">Checking LLM providers...</p>
+        </div>
+
+        <button id="runBtn" class="btn" type="button">🚀 Run Batch</button>
+
+        <div class="progress-wrap" id="progressWrap">
+            <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+            <p class="progress-text" id="progressText">Starting…</p>
+        </div>
+
+        <div id="error" class="error" style="display:none;"></div>
+        <div id="success" class="success" style="display:none;"></div>
+    </div>
+
+    <div class="section">
+        <h2>Result</h2>
+        <p class="sub">Final list of catalog JSONs, separated by a comma. Failed entries appear as <code>{"sourcePageUrl":"...","error":"..."}</code>.</p>
+        <pre id="output">No result yet.</pre>
+    </div>
+</div>
+
+<script>
+    const runBtn        = document.getElementById('runBtn');
+    const urlsField     = document.getElementById('urls');
+    const errorEl       = document.getElementById('error');
+    const successEl     = document.getElementById('success');
+    const output        = document.getElementById('output');
+    const progressWrap  = document.getElementById('progressWrap');
+    const progressFill  = document.getElementById('progressFill');
+    const progressText  = document.getElementById('progressText');
+    const useMinimax    = document.getElementById('useMinimax');
+    const llmStatus     = document.getElementById('llmStatus');
+
+    let pollTimer = null;
+
+    (async () => {
+        try {
+            const r = await fetch('/api/llm/status');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const s = await r.json();
+            const ollamaUp = !!(s.ollama && s.ollama.available);
+            const minimaxOn = !!(s.minimax && s.minimax.available);
+            if (!minimaxOn) {
+                useMinimax.disabled = true;
+                useMinimax.checked = false;
+            }
+            llmStatus.textContent =
+                'Ollama: ' + (ollamaUp ? '✅ reachable' : '❌ not reachable') +
+                '   ·   MiniMax: ' + (minimaxOn ? '✅ configured' : '⚠️ no API key (set MINIMAX_API_KEY)');
+        } catch (err) {
+            llmStatus.textContent = 'Could not reach /api/llm/status: ' + err.message;
+        }
+    })();
+
+    function parseUrls(raw) {
+        const seen = new Set();
+        const out = [];
+        for (const line of raw.split(/\r?\n/)) {
+            const t = line.trim();
+            if (!t || seen.has(t)) continue;
+            seen.add(t);
+            out.push(t);
+        }
+        return out;
+    }
+
+    runBtn.addEventListener('click', async () => {
+        errorEl.style.display = 'none';
+        successEl.style.display = 'none';
+        output.textContent = 'Submitting batch…';
+
+        const urls = parseUrls(urlsField.value);
+        if (!urls.length) {
+            errorEl.textContent = 'Please enter at least one URL.';
+            errorEl.style.display = 'block';
+            output.textContent = 'No result yet.';
+            return;
+        }
+
+        runBtn.disabled = true;
+        progressWrap.style.display = 'block';
+        progressFill.style.width = '5%';
+        progressText.textContent = 'Submitting batch of ' + urls.length + ' URL(s)…';
+
+        try {
+            // The batch endpoint runs synchronously inside the request today
+            // (one URL after another). We wrap it in a small "submit-and-poll"
+            // UX: a single async POST that returns the final list when done.
+            // To give the user a live progress bar without a per-URL job-id
+            // we animate the bar while the batch is in flight.
+            const tick = setInterval(() => {
+                const w = parseFloat(progressFill.style.width) || 5;
+                if (w < 92) progressFill.style.width = (w + 1.5) + '%';
+            }, 800);
+            progressText.textContent = 'Processing ' + urls.length + ' URL(s)…';
+
+            const res = await fetch('/api/video/pipeline/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ urls, useMinimax: !!useMinimax.checked })
+            });
+            clearInterval(tick);
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || ('HTTP ' + res.status));
+            }
+            const arr = await res.json();
+            progressFill.style.width = '100%';
+
+            const okCount = arr.filter(r => r.entry).length;
+            const errCount = arr.length - okCount;
+            progressText.textContent = 'Done. ' + okCount + ' success / ' + errCount + ' failed (of ' + arr.length + ').';
+
+            // Build the requested "list of JSONs separated by a comma"
+            const csv = arr.map(r => r.entry ? JSON.stringify(r.entry) : JSON.stringify(r)).join(',');
+            output.textContent = csv;
+            successEl.textContent = '✅ Batch complete — ' + okCount + '/' + arr.length + ' succeeded.';
+            successEl.style.display = 'block';
+        } catch (err) {
+            errorEl.textContent = err.message || String(err);
+            errorEl.style.display = 'block';
+            output.textContent = 'Failed.';
+            progressText.textContent = 'Failed.';
+        } finally {
+            runBtn.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>

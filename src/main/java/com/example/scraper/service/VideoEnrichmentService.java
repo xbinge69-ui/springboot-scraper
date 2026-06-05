@@ -2,6 +2,7 @@ package com.example.scraper.service;
 
 import com.example.scraper.model.PipelineOutcome;
 import com.example.scraper.model.VideoCatalogEntry;
+import com.example.scraper.service.llm.LlmProvider;
 import com.example.scraper.util.HttpVideoDownloader;
 import com.example.scraper.util.Slugify;
 import com.example.scraper.video.Derivatives;
@@ -63,6 +64,7 @@ public class VideoEnrichmentService {
     private final FfmpegDerivativeService ffmpeg;
     private final BunnyAssetService bunny;
     private final OllamaService ollama;
+    private final com.example.scraper.service.llm.MinimaxChatProvider minimax;
     private final VideoCatalogService catalog;
     private final long ffmpegTimeoutSeconds;
     private final long maxDownloadBytes;
@@ -76,6 +78,7 @@ public class VideoEnrichmentService {
     public VideoEnrichmentService(FfmpegDerivativeService ffmpeg,
                                   BunnyAssetService bunny,
                                   OllamaService ollama,
+                                  com.example.scraper.service.llm.MinimaxChatProvider minimax,
                                   VideoCatalogService catalog,
                                   @Value("${app.enrichment.ffmpeg-timeout-seconds:300}") long ffmpegTimeoutSeconds,
                                   @Value("${app.enrichment.max-download-bytes:2147483648}") long maxDownloadBytes,
@@ -87,6 +90,7 @@ public class VideoEnrichmentService {
         this.ffmpeg = ffmpeg;
         this.bunny = bunny;
         this.ollama = ollama;
+        this.minimax = minimax;
         this.catalog = catalog;
         this.ffmpegTimeoutSeconds = ffmpegTimeoutSeconds;
         this.maxDownloadBytes = maxDownloadBytes;
@@ -103,19 +107,24 @@ public class VideoEnrichmentService {
         Path tmp = Path.of(System.getProperty("java.io.tmpdir"));
         long cutoff = System.currentTimeMillis() - sweeperStaleMinutes * 60_000L;
         int removed = 0;
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(tmp, "scraper-enrich-*")) {
-            for (Path p : ds) {
-                try {
-                    if (Files.getLastModifiedTime(p).toMillis() < cutoff) {
-                        deleteRecursively(p);
-                        removed++;
+        // Both "scraper-enrich-*" (per-run temp) and "scraper-previews-*"
+        // (per-job preview clip dir, which survives past the request).
+        String[] globs = {"scraper-enrich-*", "scraper-previews-*"};
+        for (String glob : globs) {
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(tmp, glob)) {
+                for (Path p : ds) {
+                    try {
+                        if (Files.getLastModifiedTime(p).toMillis() < cutoff) {
+                            deleteRecursively(p);
+                            removed++;
+                        }
+                    } catch (IOException ignored) {
+                        // Best-effort.
                     }
-                } catch (IOException ignored) {
-                    // Best-effort.
                 }
+            } catch (IOException e) {
+                log.warn("Temp-dir sweeper failed for glob {}: {}", glob, e.getMessage());
             }
-        } catch (IOException e) {
-            log.warn("Temp-dir sweeper failed: {}", e.getMessage());
         }
         if (removed > 0) {
             log.info("Temp-dir sweeper removed {} stale dirs", removed);
@@ -125,8 +134,30 @@ public class VideoEnrichmentService {
     /**
      * Top-level orchestration. Returns a {@link PipelineOutcome} so the
      * existing JSON response shape (entry + warnings) is preserved.
+     *
+     * @param source     the input (local file or remote URL)
+     * @param metadata   the user-supplied metadata
+     * @param useMinimax when true, route the Topical Authority call to
+     *                   MiniMax's hosted API instead of local Ollama.
      */
-    public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata) throws IOException {
+    public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata, boolean useMinimax) throws IOException {
+        return enrich(source, metadata, useMinimax, null, null);
+    }
+
+    /**
+     * Progress-aware variant. When {@code job} is non-null, this method
+     * pushes status updates to it as it works. When {@code previewsDir}
+     * is non-null, the 5 watermark-baked preview clips are written there
+     * (and survive past the return) instead of being deleted with the
+     * enrich temp dir. Use {@code previewsDir == null} to keep the
+     * legacy "no clips generated" behavior (e.g. for the direct-upload
+     * endpoint that doesn't need a UI).
+     */
+    public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
+                                  boolean useMinimax,
+                                  com.example.scraper.model.PipelineJob job,
+                                  Path previewsDir) throws IOException {
+        if (job != null) job.markRunning("Resolving source");
         List<String> warnings = new ArrayList<>();
         Path tempDir = Files.createTempDirectory("scraper-enrich-" + UUID.randomUUID());
 
@@ -148,12 +179,14 @@ public class VideoEnrichmentService {
             deleteRecursively(tempDir);
             throw e;
         }
+        if (job != null) job.updateProgress(10, "Probing source");
 
         // ----- Steps 2 + 3: probe + process via ffmpeg, with timeout + semaphore -----
         VideoMetadata probe;
         Derivatives derivatives;
         try {
             probe = runWithTimeout("probe", () -> ffmpeg.probe(inputPath), ffmpegTimeoutSeconds);
+            if (job != null) job.updateProgress(15, "Compressing video (watermark)");
             Path derivedDir = tempDir.resolve("derivatives");
             derivatives = runWithTimeout("process",
                     () -> ffmpeg.process(inputPath, derivedDir, "enrich"),
@@ -162,6 +195,19 @@ public class VideoEnrichmentService {
             deleteRecursively(tempDir);
             throw new IOException("ffmpeg stage failed: " + e.getMessage(), e);
         }
+        if (job != null) job.updateProgress(50, "Generating 5 preview clips with watermark");
+
+        // ----- Step 3b: generate 5 watermark-baked preview clips (per-job, if requested) -----
+        java.util.List<Path> previewClipPaths = new java.util.ArrayList<>();
+        if (previewsDir != null) {
+            try {
+                previewClipPaths.addAll(ffmpeg.generatePreviewClips(
+                        inputPath, previewsDir, "clip", probe, probe.hasAudio()));
+            } catch (Exception e) {
+                warnings.add("Preview clip generation failed: " + e.getMessage());
+            }
+        }
+        if (job != null) job.updateProgress(70, "Uploading derivatives to CDN");
 
         // ----- Steps 4-5: upload all 3 derivatives to Bunny (the only CDN) -----
         String slugHint = Slugify.slugify(metadata.titleOrFallback());
@@ -181,6 +227,7 @@ public class VideoEnrichmentService {
             deleteRecursively(tempDir);
             throw new IOException("bunny upload failed: " + e.getMessage(), e);
         }
+        if (job != null) job.updateProgress(80, "Running LLM enrichment");
 
         // No second CDN — backupEmbedUrl mirrors embedUrl (the compressed
         // Bunny URL) so the field stays populated for any downstream consumer
@@ -188,8 +235,11 @@ public class VideoEnrichmentService {
         // model so it's trivial to remove later.
         String backupEmbedUrl = compressedUrl;
 
-        // ----- Step 7: Ollama Topical Authority pass -----
+        // ----- Step 7: LLM Topical Authority pass -----
         TopicalAuthorityResult llm;
+        LlmProvider provider = (useMinimax && minimax != null && minimax.isAvailable())
+                ? minimax
+                : ollama;
         try {
             String summary = catalog.summarize();
             String prompt = TopicalAuthorityPrompt.buildPrompt(metadata, summary);
@@ -197,12 +247,13 @@ public class VideoEnrichmentService {
                     "format", ollamaFormat,
                     "temperature", ollamaTemperature
             );
-            String raw = ollama.generate(prompt, options);
+            String raw = provider.generate(prompt, options);
             llm = TopicalAuthorityPrompt.parse(raw, metadata);
         } catch (Exception e) {
-            warnings.add("Ollama unavailable; fallback metadata used: " + e.getMessage());
+            warnings.add("LLM (" + provider.name() + ") unavailable; fallback metadata used: " + e.getMessage());
             llm = TopicalAuthorityPrompt.parse(null, metadata);
         }
+        if (job != null) job.updateProgress(92, "Saving to catalog");
 
         // ----- Steps 8-9: build & persist entry -----
         VideoCatalogEntry entry = new VideoCatalogEntry();
@@ -230,6 +281,9 @@ public class VideoEnrichmentService {
         }
 
         deleteRecursively(tempDir);
+        // Stash the clip paths in the outcome's job so the controller can
+        // return them; we keep them on the PipelineJob itself (set by the
+        // controller after this method returns) — see ScraperController.
         return new PipelineOutcome(saved, warnings);
     }
 

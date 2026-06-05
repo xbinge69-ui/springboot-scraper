@@ -10,6 +10,8 @@ public class PipelineRequest {
     private String unknownActressName;
     private String actressId;
     private Long views;
+    /** When true, the LLM enrichment step uses MiniMax instead of local Ollama. */
+    private Boolean useMinimax;
 
     public String getSourcePageUrl() { return sourcePageUrl; }
     public void setSourcePageUrl(String sourcePageUrl) { this.sourcePageUrl = sourcePageUrl; }
@@ -34,4 +36,8 @@ public class PipelineRequest {
 
     public Long getViews() { return views; }
     public void setViews(Long views) { this.views = views; }
+
+    public Boolean getUseMinimax() { return useMinimax; }
+    public void setUseMinimax(Boolean useMinimax) { this.useMinimax = useMinimax; }
 }
+
