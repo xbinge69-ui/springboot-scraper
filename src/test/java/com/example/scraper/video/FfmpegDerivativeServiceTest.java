@@ -263,6 +263,52 @@ class FfmpegDerivativeServiceTest {
     }
 
     @Test
+    void buildCompressedJob_omitsSsFlagWhenSkipIsZero() {
+        // No skip → the input has no -ss. The ffmpeg command line
+        // would otherwise have a -ss 0.000 argument that confuses
+        // downstream parsers and adds nothing.
+        var builder = service.buildCompressedJob(Path.of("/tmp/in.mp4"),
+                Path.of("/tmp/out.mp4"), false, 0.0);
+        var cmd = builder.build();
+        assertThat(cmd).noneMatch(arg -> arg.equals("-ss"));
+        // -i flag and the input path must be present (separately,
+        // because FFmpegBuilder normalizes Windows backslashes — the
+        // exact "/tmp/in.mp4" string is only on POSIX runtimes).
+        assertThat(cmd).contains("-i");
+        assertThat(cmd).anyMatch(a -> a.endsWith("in.mp4"));
+    }
+
+    @Test
+    void buildCompressedJob_addsSsFlagBeforeInputWhenSkipIsPositive() {
+        // xhamster case: skipHead=6 should emit "-ss <sec> -i in.mp4"
+        // (input-side fast seek, before the -i flag).
+        var builder = service.buildCompressedJob(Path.of("/tmp/in.mp4"),
+                Path.of("/tmp/out.mp4"), true, 6.0);
+        var cmd = builder.build();
+        int ssIdx = -1, iIdx = -1;
+        for (int i = 0; i < cmd.size(); i++) {
+            if ("-ss".equals(cmd.get(i))) ssIdx = i;
+            if ("-i".equals(cmd.get(i))) iIdx = i;
+        }
+        assertThat(ssIdx).as("-ss flag must be present").isNotNegative();
+        assertThat(iIdx).as("-i flag must be present").isNotNegative();
+        assertThat(ssIdx).as("-ss must come BEFORE -i (input-side seek)").isLessThan(iIdx);
+        // Argument immediately after -ss should be a number containing "6".
+        assertThat(cmd.get(ssIdx + 1)).contains("6");
+    }
+
+    @Test
+    void buildCompressedJob_omitsSsFlagWhenSkipIsNegative() {
+        // Negative skips would be a bug elsewhere; the job should treat
+        // them as "no skip" defensively (buildCompressedJob's only
+        // contract is "if skipHead > 0, emit -ss"). The duration-clamp
+        // for safety lives in process(), not here.
+        var builder = service.buildCompressedJob(Path.of("/tmp/in.mp4"),
+                Path.of("/tmp/out.mp4"), false, -1.0);
+        assertThat(builder.build()).noneMatch(arg -> arg.equals("-ss"));
+    }
+
+    @Test
     void assertAspectPreserved_helperItselfWorks() throws IOException {
         // Sanity: same file aspect-pass.
         assertAspectPreserved(largeLandscape, largeLandscape, ASPECT_EPSILON);

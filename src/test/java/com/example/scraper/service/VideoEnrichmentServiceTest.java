@@ -283,4 +283,47 @@ class VideoEnrichmentServiceTest {
             throw new RuntimeException(e);
         }
     }
+
+    // ----- computeSkipHeadSeconds unit tests -----
+
+    @Test
+    void computeSkipHeadSeconds_returns6ForXhamsterComVariant() {
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://cdn.xhamster.com/.../v.mp4",
+                        "https://xhamster.com/videos/abc-123"))).isEqualTo(6.0);
+    }
+
+    @Test
+    void computeSkipHeadSeconds_returns6ForXhamsterCountryVariants() {
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://xhamster.desi/v/foo",
+                        "https://xhamster.desi/videos/foo"))).isEqualTo(6.0);
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://xhamster2.com/v/foo",
+                        "https://xhamster2.com/videos/foo"))).isEqualTo(6.0);
+    }
+
+    @Test
+    void computeSkipHeadSeconds_returns0ForErome() {
+        // Erome is the most common other source — must NOT trigger the
+        // 6s skip, even though its video files share some CDN with xhamster.
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://erome.com/a/abc",
+                        "https://www.erome.com/a/abc"))).isEqualTo(0.0);
+    }
+
+    @Test
+    void computeSkipHeadSeconds_returns0ForLocalFileSource() {
+        // No page URL on a local file → no skip.
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.LocalFile(Path.of("/tmp/in.mp4"), 100))).isEqualTo(0.0);
+    }
+
+    @Test
+    void computeSkipHeadSeconds_returns0ForBlankReferer() {
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://example.com/video.mp4", ""))).isEqualTo(0.0);
+        assertThat(VideoEnrichmentService.computeSkipHeadSeconds(
+                new EnrichmentSource.RemoteUrl("https://example.com/video.mp4", null))).isEqualTo(0.0);
+    }
 }

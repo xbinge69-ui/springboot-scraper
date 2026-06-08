@@ -3,6 +3,7 @@ package com.example.scraper.service;
 import com.example.scraper.model.PipelineOutcome;
 import com.example.scraper.model.PipelineStats;
 import com.example.scraper.model.VideoCatalogEntry;
+import com.example.scraper.scraper.XhamsterTagExtractor;
 import com.example.scraper.service.llm.LlmProvider;
 import com.example.scraper.util.HttpVideoDownloader;
 import com.example.scraper.util.Slugify;
@@ -238,12 +239,20 @@ public class VideoEnrichmentService {
         }
 
         // ----- Step 4: heavy 720p re-encode + 5s preview + thumbnail -----
+        // Skip the source's intro/bumper before encoding the COMPRESSED
+        // output only — xhamster (and its country variants) prepend a
+        // 6-second logo bumper to every video. The 5s preview, the
+        // thumbnail, and the 5 mini clips still come from the
+        // un-trimmed source so we keep the intro visible in previews
+        // and don't lose any content.
+        double skipHeadSeconds = computeSkipHeadSeconds(source);
         Derivatives derivatives;
         try {
-            if (job != null) job.updateProgress(40, "Compressing video (watermark)");
+            if (job != null) job.updateProgress(40, "Compressing video (watermark)"
+                    + (skipHeadSeconds > 0 ? " (skipping first " + (int) skipHeadSeconds + "s)" : ""));
             Path derivedDir = tempDir.resolve("derivatives");
             derivatives = runWithTimeout("process",
-                    () -> ffmpeg.process(inputPath, derivedDir, "enrich"),
+                    () -> ffmpeg.process(inputPath, derivedDir, "enrich", probe, skipHeadSeconds),
                     ffmpegTimeoutSeconds * 3);  // process is 3 sub-encodes
         } catch (Exception e) {
             deleteRecursively(tempDir);
@@ -396,6 +405,34 @@ public class VideoEnrichmentService {
      * or unreadable so the caller can distinguish "not measured" from
      * "zero bytes" (both are possible in the wild).
      */
+    /**
+     * Compute the number of seconds to skip from the start of the
+     * source before encoding the COMPRESSED output. Returns 0 for
+     * sources that don't need a head trim.
+     *
+     * <p>Today only xhamster is handled — the platform appends a
+     * 6-second logo bumper to every video that's not actual content.
+     * We drop those 6 seconds from the compressed re-encode so the
+     * viewer never sees the ad/intro. The 5s preview, thumbnail, and
+     * 5 mini clips are still sampled from the un-trimmed source so
+     * the user can still scrub the intro on the pipeline page.
+     *
+     * <p>The page URL (not the video file URL) is the one to inspect:
+     * video files live on xhamster's CDN under a generic hostname and
+     * don't carry the "xhamster" string, but the page URL is always
+     * {@code xhamster.com} or one of its country variants
+     * ({@code xhamster.desi}, {@code xhamster2.com}, …).
+     */
+    static double computeSkipHeadSeconds(EnrichmentSource source) {
+        if (!(source instanceof EnrichmentSource.RemoteUrl ru)) return 0.0;
+        String pageUrl = ru.referer();
+        if (pageUrl == null || pageUrl.isBlank()) return 0.0;
+        if (XhamsterTagExtractor.isXhamster(pageUrl)) {
+            return 6.0;
+        }
+        return 0.0;
+    }
+
     private static long safeSize(Path p) {
         if (p == null) return -1L;
         try {

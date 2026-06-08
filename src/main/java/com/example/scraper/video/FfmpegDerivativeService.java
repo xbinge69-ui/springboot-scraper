@@ -193,7 +193,12 @@ public class FfmpegDerivativeService {
 
     /** Convenience: probe then process in one call. */
     public Derivatives process(Path input, Path outputDir, String baseName) throws IOException {
-        return process(input, outputDir, baseName, probe(input));
+        return process(input, outputDir, baseName, probe(input), 0.0);
+    }
+
+    public Derivatives process(Path input, Path outputDir, String baseName, VideoMetadata precomputed)
+            throws IOException {
+        return process(input, outputDir, baseName, precomputed, 0.0);
     }
 
     /**
@@ -202,14 +207,30 @@ public class FfmpegDerivativeService {
      *
      * <p>{@code precomputed} lets the CLI runner print the probed
      * metadata before kicking off the encode without re-probing.
+     *
+     * <p>{@code skipHeadSeconds} trims the first N seconds of the source
+     * before encoding the COMPRESSED output only. The 5s preview, the
+     * thumbnail, and (when generated separately) the 5 watermark-baked
+     * mini clips are still taken from the original source — only the
+     * full compressed re-encode is trimmed. Use this to drop a site's
+     * intro/ad segment (e.g. xhamster's first 6 seconds are a logo
+     * bumper) without losing any of the actual content from the
+     * derived previews.
      */
-    public Derivatives process(Path input, Path outputDir, String baseName, VideoMetadata precomputed)
+    public Derivatives process(Path input, Path outputDir, String baseName, VideoMetadata precomputed,
+                               double skipHeadSeconds)
             throws IOException {
         Files.createDirectories(outputDir);
 
         Path compressedPath = outputDir.resolve(baseName + ".compressed.mp4");
         Path previewPath    = outputDir.resolve(baseName + ".preview.mp4");
         Path thumbnailPath  = outputDir.resolve(baseName + ".thumbnail.jpg");
+
+        // Clamp the skip to the source duration minus a 0.5s safety
+        // margin so we never ask ffmpeg to skip past the end (which
+        // would emit a zero-byte file with a non-zero exit code).
+        double effectiveSkip = Math.max(0.0,
+                Math.min(skipHeadSeconds, Math.max(0.0, precomputed.durationSeconds() - 0.5)));
 
         double thumbSec   = clampToDuration(precomputed.durationSeconds() * props.getThumbnailPosition(),
                                             precomputed.durationSeconds());
@@ -225,15 +246,16 @@ public class FfmpegDerivativeService {
         // log lines below unambiguous).
         VideoEncoderStrategy enc = encoder();
         log.info("ffmpeg derivative start: input={}, baseName={}, encoder={} (hwAccel={}), "
-                        + "duration={}s, hasAudio={}, thumbSec={}, previewSec={}, previewDur={}",
+                        + "duration={}s, hasAudio={}, thumbSec={}, previewSec={}, previewDur={}, skipHead={}s",
                 input, baseName, enc.name(), enc.isHardwareAccelerated(),
                 String.format("%.2f", precomputed.durationSeconds()),
                 precomputed.hasAudio(),
                 String.format("%.2f", thumbSec),
                 String.format("%.2f", previewSec),
-                String.format("%.2f", previewDur));
+                String.format("%.2f", previewDur),
+                String.format("%.2f", effectiveSkip));
 
-        runCompressed(input, compressedPath, precomputed.hasAudio());
+        runCompressed(input, compressedPath, precomputed.hasAudio(), effectiveSkip);
         runPreview(input, previewPath, previewSec, previewDur, precomputed.hasAudio());
         runThumbnail(input, thumbnailPath, thumbSec);
 
@@ -359,8 +381,27 @@ public class FfmpegDerivativeService {
     }
 
     FFmpegBuilder buildCompressedJob(Path input, Path output, boolean hasAudio) {
+        return buildCompressedJob(input, output, hasAudio, 0.0);
+    }
+
+    /**
+     * Build the compressed-output job. When {@code skipHeadSeconds > 0},
+     * a fast input-side {@code -ss} seek is applied — the encoder jumps
+     * to the nearest keyframe at or after that timestamp and re-encodes
+     * from there. Fast seek is fine here: the skip target (e.g. 6s for
+     * xhamster's intro) is small relative to a typical 5-10 minute
+     * source, so any keyframe snap of ±0.5s is well past the ad
+     * bumper the user wants to drop.
+     */
+    FFmpegBuilder buildCompressedJob(Path input, Path output, boolean hasAudio, double skipHeadSeconds) {
         FFmpegBuilder b = new FFmpegBuilder().overrideOutputFiles(true);
-        b.setInput(input.toString());  // input side; no seek
+        if (skipHeadSeconds > 0.0) {
+            // Input-side seek — emit "-ss <sec> -i <input>".
+            b.setInput(input.toString())
+                    .setStartOffset((long) (skipHeadSeconds * 1000d), TimeUnit.MILLISECONDS);
+        } else {
+            b.setInput(input.toString());
+        }
         FFmpegOutputBuilder o = b.addOutput(output.toString())
                 .setVideoFilter(scaleFilterWithWatermark(props.getWatermarkFontSizeMain()))
                 .setVideoMovFlags("+faststart");
@@ -477,10 +518,15 @@ public class FfmpegDerivativeService {
     // -------- private runners --------
 
     private void runCompressed(Path input, Path output, boolean hasAudio) throws IOException {
-        log.info("ffmpeg compressed start: {}", output);
+        runCompressed(input, output, hasAudio, 0.0);
+    }
+
+    private void runCompressed(Path input, Path output, boolean hasAudio, double skipHeadSeconds) throws IOException {
+        log.info("ffmpeg compressed start: {} (skipHead={}s)", output,
+                String.format("%.2f", skipHeadSeconds));
         long t0 = System.currentTimeMillis();
         try {
-            ffmpeg.run(buildCompressedJob(input, output, hasAudio));
+            ffmpeg.run(buildCompressedJob(input, output, hasAudio, skipHeadSeconds));
         } catch (Exception e) {
             throw new IOException("ffmpeg compressed failed for " + input + " -> " + output, e);
         }
