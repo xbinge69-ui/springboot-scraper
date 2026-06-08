@@ -137,7 +137,11 @@ https://www.erome.com/a/zzzz"></textarea>
 
     <div class="section">
         <h2>Result</h2>
-        <p class="sub">Final list of catalog JSONs, separated by a comma. Failed entries appear as <code>{"sourcePageUrl":"...","error":"..."}</code>.</p>
+        <p class="sub">Final list of catalog JSONs, separated by commas. Failed entries appear as <code>{"sourcePageUrl":"...","error":"..."}</code>.</p>
+        <div class="row" style="margin-top:.5rem;">
+            <button id="copyBtn" type="button" style="margin-top:0;">📋 Copy list</button>
+            <span id="copyStatus" class="hint" style="margin:0;"></span>
+        </div>
         <pre id="output">No result yet.</pre>
     </div>
 </div>
@@ -157,6 +161,8 @@ https://www.erome.com/a/zzzz"></textarea>
     const ffmpegDetails = document.getElementById('ffmpegDetails');
     const ffmpegRefresh = document.getElementById('ffmpegRefreshBtn');
     const llmStatus     = document.getElementById('llmStatus');
+    const copyBtn       = document.getElementById('copyBtn');
+    const copyStatus    = document.getElementById('copyStatus');
 
     let pollTimer = null;
 
@@ -269,6 +275,37 @@ https://www.erome.com/a/zzzz"></textarea>
     if (ffmpegRefresh) ffmpegRefresh.addEventListener('click', refreshFfmpegStatus);
     refreshFfmpegStatus();
 
+    // ---- Copy result list to clipboard ----
+    if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+            const text = output.textContent || '';
+            if (!text || text === 'No result yet.' || text === 'Failed.') {
+                copyStatus.textContent = '⚠️ nothing to copy yet';
+                return;
+            }
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    // Fallback for non-secure contexts (e.g. http://localhost
+                    // on some browsers): use a hidden textarea + execCommand.
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                copyStatus.textContent = '✅ copied to clipboard';
+                setTimeout(() => { copyStatus.textContent = ''; }, 2500);
+            } catch (err) {
+                copyStatus.textContent = '❌ copy failed: ' + (err.message || err);
+            }
+        });
+    }
+
     runBtn.addEventListener('click', async () => {
         errorEl.style.display = 'none';
         successEl.style.display = 'none';
@@ -316,24 +353,12 @@ https://www.erome.com/a/zzzz"></textarea>
             const errCount = arr.length - okCount;
             progressText.textContent = 'Done. ' + okCount + ' success / ' + errCount + ' failed (of ' + arr.length + ').';
 
-            // Per-row size summary: "✅ url X · 142 MB → 18 MB (12.7%) via h264_nvenc"
-            // Rendered above the CSV so the user sees the before/after at a
-            // glance, even when the batch has dozens of entries.
-            const lines = arr.map(r => {
-                if (!r.entry) return '❌ ' + (r.sourcePageUrl || '?') + ' — ' + (r.error || 'failed');
-                const s = r.stats || {};
-                const inMB  = s.inputBytes     > 0 ? (s.inputBytes     / 1048576).toFixed(1) + ' MB' : '?';
-                const outMB = s.compressedBytes > 0 ? (s.compressedBytes / 1048576).toFixed(1) + ' MB' : '?';
-                const pct   = s.compressedPctOfInput > 0 ? ' (' + s.compressedPctOfInput + '% of input)' : '';
-                const enc   = s.videoEncoder
-                    ? ' via ' + s.videoEncoder + (s.hardwareAccelerated ? ' (GPU ✅)' : ' (CPU)')
-                    : '';
-                return '✅ ' + (r.sourcePageUrl || '?')
-                    + '   ·   ' + inMB + ' → ' + outMB + pct + enc;
-            });
-            // Build the requested "list of JSONs separated by a comma"
+            // User asked for a clean comma-separated list of the entries
+            // (no `entry` wrapper, no `stats` block) — exactly the JSON
+            // shape that gets appended to videos.json. Failed rows fall
+            // back to `{"sourcePageUrl":"...","error":"..."}`.
             const csv = arr.map(r => r.entry ? JSON.stringify(r.entry) : JSON.stringify(r)).join(',');
-            output.textContent = lines.join('\n') + '\n\n--- raw entries ---\n' + csv;
+            output.textContent = csv;
             successEl.textContent = '✅ Batch complete — ' + okCount + '/' + arr.length + ' succeeded.';
             successEl.style.display = 'block';
         } catch (err) {

@@ -215,7 +215,11 @@
             <button id="deleteAllBtn" class="btn danger" type="button">🗑️ Delete all preview clips</button>
         </div>
 
-        <h3>Raw JSON</h3>
+        <h3>Result JSON <span class="sub" style="font-weight:400;">(entry fields only, no stats)</span></h3>
+        <div class="row" style="margin-top:.5rem;">
+            <button id="copyBtn" class="btn secondary" type="button">📋 Copy JSON</button>
+            <span id="copyStatus" class="hint" style="margin:0;"></span>
+        </div>
         <pre id="output">No result yet.</pre>
     </div>
 </div>
@@ -247,6 +251,8 @@
     const mainDownload  = document.getElementById('mainDownload');
     const clipGrid      = document.getElementById('clipGrid');
     const deleteAllBtn  = document.getElementById('deleteAllBtn');
+    const copyBtn       = document.getElementById('copyBtn');
+    const copyStatus    = document.getElementById('copyStatus');
 
     let currentJobId = null;
     let pollTimer    = null;
@@ -509,7 +515,10 @@
         const result = snap.result || {};
         const entry  = result.entry || {};
         const stats  = result.stats || {};
-        output.textContent = JSON.stringify(result, null, 2);
+        // User asked for a clean view: show entry fields only — no `entry`
+        // wrapper, no `stats` block. `{field:Values}` is exactly the
+        // catalog entry that gets written to videos.json.
+        output.textContent = JSON.stringify(entry, null, 2);
         // Compose a one-liner: "✅ done — id X · input 142 MB → compressed 18 MB
         // (12.7%) via h264_nvenc (GPU)". The user wanted to see this on
         // every run; falls back to a plain "done" if stats are missing
@@ -558,6 +567,37 @@
         deleteAllBtn.onclick = deleteAllClips;
         resultSection.style.display = 'block';
         resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ---- Copy result JSON to clipboard ----
+    if (copyBtn) {
+        copyBtn.addEventListener('click', async () => {
+            const text = output.textContent || '';
+            if (!text || text === 'No result yet.' || text === 'Failed.') {
+                copyStatus.textContent = '⚠️ nothing to copy yet';
+                return;
+            }
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    // Fallback for non-secure contexts (e.g. http://localhost
+                    // on some browsers): use a hidden textarea + execCommand.
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                copyStatus.textContent = '✅ copied to clipboard';
+                setTimeout(() => { copyStatus.textContent = ''; }, 2500);
+            } catch (err) {
+                copyStatus.textContent = '❌ copy failed: ' + (err.message || err);
+            }
+        });
     }
 
     async function deleteClip(cardEl, filename) {
