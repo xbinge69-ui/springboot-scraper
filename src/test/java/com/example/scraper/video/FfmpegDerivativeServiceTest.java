@@ -94,7 +94,9 @@ class FfmpegDerivativeServiceTest {
                 "Spankycouples.com",
                 18, 24, 0.85,
                 "black@0.4", 6, 12,
-                25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95});
+                25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                true, "nvidia,intel,amd",
+                "h264");  // tests intentionally use the legacy H.264 path
         FFmpeg ffmpeg = new FFmpeg(props.getFfmpegPath());
         ffprobe = new FFprobe(props.getFfprobePath());
         service = new FfmpegDerivativeService(props, ffmpeg, ffprobe);

@@ -103,9 +103,25 @@ https://www.erome.com/a/zzzz"></textarea>
         <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
             <label style="display:flex; align-items:center; gap:.5rem; margin:0; font-weight:600; cursor:pointer;">
                 <input id="useMinimax" type="checkbox" style="width:auto;"/>
-                <span>🧠 Use MiniMax for the Topical Authority LLM pass (overrides local Ollama for this batch)</span>
+                <span>🧠 Use <strong>Minimax</strong> hosted API for this batch (off by default — uses local Ollama <code>minimax-m3</code> otherwise)</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:.5rem; margin:.5rem 0 0; font-weight:600; cursor:pointer;">
+                <input id="skipLlm" type="checkbox" style="width:auto;"/>
+                <span>⏭️ <strong>Skip LLM enrichment</strong> for every entry (no Ollama/Minimax call, 2-10s faster per URL)</span>
             </label>
             <p id="llmStatus" class="hint" style="margin:.4rem 0 0;">Checking LLM providers...</p>
+        </div>
+
+        <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                <strong>🎬 ffmpeg / GPU encoder</strong>
+                <button type="button" id="ffmpegRefreshBtn" class="btn secondary" style="font-size:.75rem; padding:.2rem .6rem;">↻ Re-probe</button>
+            </div>
+            <p id="ffmpegSummary" class="hint" style="margin:.4rem 0;">Probing ffmpeg GPU encoders...</p>
+            <details style="margin-top:.4rem;">
+                <summary style="cursor:pointer; font-size:.85rem; color:#94a3b8;">Show details</summary>
+                <div id="ffmpegDetails" style="font-size:.8rem; font-family:monospace; padding:.4rem; background:#020617; border-radius:4px; margin-top:.4rem; white-space:pre-wrap;"></div>
+            </details>
         </div>
 
         <button id="runBtn" class="btn" type="button">🚀 Run Batch</button>
@@ -136,6 +152,10 @@ https://www.erome.com/a/zzzz"></textarea>
     const progressFill  = document.getElementById('progressFill');
     const progressText  = document.getElementById('progressText');
     const useMinimax    = document.getElementById('useMinimax');
+    const skipLlm       = document.getElementById('skipLlm');
+    const ffmpegSummary = document.getElementById('ffmpegSummary');
+    const ffmpegDetails = document.getElementById('ffmpegDetails');
+    const ffmpegRefresh = document.getElementById('ffmpegRefreshBtn');
     const llmStatus     = document.getElementById('llmStatus');
 
     let pollTimer = null;
@@ -146,14 +166,53 @@ https://www.erome.com/a/zzzz"></textarea>
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const s = await r.json();
             const ollamaUp = !!(s.ollama && s.ollama.available);
-            const minimaxOn = !!(s.minimax && s.minimax.available);
+            const minimaxInfo = s.minimax || {};
+            const minimaxOn = !!minimaxInfo.available;
             if (!minimaxOn) {
                 useMinimax.disabled = true;
                 useMinimax.checked = false;
             }
             llmStatus.textContent =
                 'Ollama: ' + (ollamaUp ? '✅ reachable' : '❌ not reachable') +
-                '   ·   MiniMax: ' + (minimaxOn ? '✅ configured' : '⚠️ no API key (set MINIMAX_API_KEY)');
+                '   ·   MiniMax: ' + (minimaxOn
+                    ? '✅ configured'
+                    : '⚠️ ' + (minimaxInfo.reason || 'not configured'));
+
+            // Active probe — see video-pipeline.html for the rationale.
+            try {
+                const t = await fetch('/api/llm/ollama/test');
+                const tr = await t.json();
+                if (tr.ok) {
+                    llmStatus.textContent +=
+                        '  ·  Ollama model: ✅ ' + tr.matchedAs + ' (' + tr.latencyMs + 'ms)';
+                } else if (tr.reachable) {
+                    llmStatus.textContent +=
+                        '  ·  Ollama model: ❌ ' + tr.message
+                        + (tr.suggestedCommand ? '   (try: ' + tr.suggestedCommand + ')' : '');
+                } else {
+                    llmStatus.textContent += '  ·  Ollama model: ❌ ' + tr.message;
+                }
+            } catch (_) { /* best-effort */ }
+
+            if (minimaxOn) {
+                try {
+                    const t = await fetch('/api/llm/minimax/test');
+                    const tr = await t.json();
+                    if (tr.ok) {
+                        llmStatus.textContent += '  ·  MiniMax ping: ✅ (' + tr.latencyMs + 'ms)';
+                    } else {
+                        let verdict = '⚠️ ping failed';
+                        if (tr.baseRespCode) {
+                            verdict = '❌ base_resp ' + tr.baseRespCode + ': ' + tr.baseRespMsg;
+                        } else if (tr.baseRespMsg) {
+                            verdict = '❌ ' + tr.baseRespMsg;
+                        }
+                        llmStatus.textContent += '  ·  MiniMax ping: ' + verdict;
+                        useMinimax.disabled = true;
+                        useMinimax.checked = false;
+                    }
+                } catch (_) { /* best-effort */ }
+            }
         } catch (err) {
             llmStatus.textContent = 'Could not reach /api/llm/status: ' + err.message;
         }
@@ -170,6 +229,45 @@ https://www.erome.com/a/zzzz"></textarea>
         }
         return out;
     }
+
+    // ---- ffmpeg / GPU probe ----
+    async function refreshFfmpegStatus() {
+        ffmpegSummary.textContent = 'Probing ffmpeg GPU encoders…';
+        try {
+            const r = await fetch('/api/ffmpeg/test');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const t = await r.json();
+            const enc = t.nextEncoder || '?';
+            const isGpu = t.nextIsGpu;
+            ffmpegSummary.textContent = (isGpu ? '✅ ' : '❌ ')
+                + 'next encode: ' + enc
+                + (isGpu ? ' (GPU ✅)' : ' (CPU) ')
+                + '· codec=' + (t.activeCodec || '?')
+                + ' · ffmpeg: ' + (t.ffmpegPath || '?');
+            const avail = (t.available || []);
+            const availStr = avail.length === 0
+                ? '   (none)'
+                : avail.map(d => '   · ' + d.vendor + ' ' + d.codec + ' → ' + d.encoder).join('\n');
+            const sel = t.selected || {};
+            const selStr = Object.keys(sel).length === 0
+                ? '   (none)'
+                : Object.keys(sel).map(k => '   · ' + k + ' → ' + (sel[k] ? sel[k].vendor + ' / ' + sel[k].encoder : '(none)')).join('\n');
+            ffmpegDetails.textContent =
+                (t.message || '(no message)') + '\n\n'
+                + 'ffmpeg path:       ' + (t.ffmpegPath || '?') + '\n'
+                + 'GPU enabled:       ' + (t.gpuEnabled ? 'yes' : 'no') + '\n'
+                + 'GPU preference:    ' + (t.preferenceOrder || '?') + '\n'
+                + 'Active codec:      ' + (t.activeCodec || '?') + '\n'
+                + 'Next encoder:      ' + enc + (isGpu ? ' (GPU)' : ' (CPU)') + '\n'
+                + '\nAvailable GPU encoders (' + avail.length + '):\n' + availStr
+                + '\n\nSelected per codec:\n' + selStr;
+        } catch (err) {
+            ffmpegSummary.textContent = '❌ could not reach /api/ffmpeg/test: ' + err.message;
+            ffmpegDetails.textContent = '';
+        }
+    }
+    if (ffmpegRefresh) ffmpegRefresh.addEventListener('click', refreshFfmpegStatus);
+    refreshFfmpegStatus();
 
     runBtn.addEventListener('click', async () => {
         errorEl.style.display = 'none';
@@ -204,7 +302,7 @@ https://www.erome.com/a/zzzz"></textarea>
             const res = await fetch('/api/video/pipeline/batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls, useMinimax: !!useMinimax.checked })
+                body: JSON.stringify({ urls, useMinimax: !!useMinimax.checked, skipLlm: !!skipLlm.checked })
             });
             clearInterval(tick);
             if (!res.ok) {
@@ -218,9 +316,24 @@ https://www.erome.com/a/zzzz"></textarea>
             const errCount = arr.length - okCount;
             progressText.textContent = 'Done. ' + okCount + ' success / ' + errCount + ' failed (of ' + arr.length + ').';
 
+            // Per-row size summary: "✅ url X · 142 MB → 18 MB (12.7%) via h264_nvenc"
+            // Rendered above the CSV so the user sees the before/after at a
+            // glance, even when the batch has dozens of entries.
+            const lines = arr.map(r => {
+                if (!r.entry) return '❌ ' + (r.sourcePageUrl || '?') + ' — ' + (r.error || 'failed');
+                const s = r.stats || {};
+                const inMB  = s.inputBytes     > 0 ? (s.inputBytes     / 1048576).toFixed(1) + ' MB' : '?';
+                const outMB = s.compressedBytes > 0 ? (s.compressedBytes / 1048576).toFixed(1) + ' MB' : '?';
+                const pct   = s.compressedPctOfInput > 0 ? ' (' + s.compressedPctOfInput + '% of input)' : '';
+                const enc   = s.videoEncoder
+                    ? ' via ' + s.videoEncoder + (s.hardwareAccelerated ? ' (GPU ✅)' : ' (CPU)')
+                    : '';
+                return '✅ ' + (r.sourcePageUrl || '?')
+                    + '   ·   ' + inMB + ' → ' + outMB + pct + enc;
+            });
             // Build the requested "list of JSONs separated by a comma"
             const csv = arr.map(r => r.entry ? JSON.stringify(r.entry) : JSON.stringify(r)).join(',');
-            output.textContent = csv;
+            output.textContent = lines.join('\n') + '\n\n--- raw entries ---\n' + csv;
             successEl.textContent = '✅ Batch complete — ' + okCount + '/' + arr.length + ' succeeded.';
             successEl.style.display = 'block';
         } catch (err) {

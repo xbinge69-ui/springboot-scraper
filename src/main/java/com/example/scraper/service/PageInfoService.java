@@ -3,6 +3,7 @@ package com.example.scraper.service;
 import com.example.scraper.model.PageInfo;
 import com.example.scraper.model.VideoResult;
 import com.example.scraper.scraper.SiteScraper;
+import com.example.scraper.scraper.XhamsterTagExtractor;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -76,22 +77,39 @@ public class PageInfoService {
         ));
 
         LinkedHashSet<String> tags = new LinkedHashSet<>();
+        if (XhamsterTagExtractor.isXhamster(trimmed)) {
+            // xhamster only renders ~18 of the (often 40+) tags in the
+            // visible DOM — the rest are behind a "more" toggle. It does,
+            // however, embed the full "tags":[ ... ] JSON array in the
+            // page source, which the dedicated extractor parses. This
+            // gives us the complete list AND separates the performers
+            // (pornstars — the "tags with avatars") from regular tags.
+            XhamsterTagExtractor.XhamsterTags xh = XhamsterTagExtractor.extract(doc);
+            tags.addAll(xh.all());
+            info.setPornstars(new ArrayList<>(xh.pornstars()));
+            info.setChannels(new ArrayList<>(xh.channels()));
+            info.setCategories(new ArrayList<>(xh.categories()));
+        }
         collectMetaKeywords(doc, tags);
         collectLinkRelTags(doc, tags);
         collectKeywordElements(doc, tags);
         collectAnchorTags(doc, "a[href*='/tag/'], a[href*='/tags/'], a[href*='?tag=']", tags);
         info.setTags(new ArrayList<>(tags));
 
+        // Category: prefer a structural source (breadcrumb, meta), then
+        // fall back to the first xhamster category, then to the URL.
         info.setCategory(firstNonBlank(
                 metaContent(doc, "property", "article:section"),
                 metaContent(doc, "name", "category"),
                 breadcrumbLast(doc),
+                firstCategory(info.getCategories()),
                 detectCategoryFromUrl(trimmed)
         ));
 
         info.setActress(firstNonBlank(
                 metaContent(doc, "property", "video:actor"),
                 metaContent(doc, "name", "twitter:creator"),
+                firstPornstar(info.getPornstars()),
                 firstModelName(doc)
         ));
 
@@ -191,6 +209,24 @@ public class PageInfoService {
         for (Element el : doc.select("[class*='model' i] a, [class*='performer' i] a, [class*='pornstar' i] a, [class*='actress' i] a")) {
             String t = el.text();
             if (t != null && !t.isBlank() && t.length() < 60) return t.trim();
+        }
+        return "";
+    }
+
+    /** First non-blank entry in the pornstar list, or empty. */
+    private String firstPornstar(List<String> pornstars) {
+        if (pornstars == null) return "";
+        for (String p : pornstars) {
+            if (p != null && !p.isBlank()) return p.trim();
+        }
+        return "";
+    }
+
+    /** First non-blank entry in the categories list, or empty. */
+    private String firstCategory(List<String> categories) {
+        if (categories == null) return "";
+        for (String c : categories) {
+            if (c != null && !c.isBlank()) return c.trim();
         }
         return "";
     }

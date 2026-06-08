@@ -125,5 +125,78 @@ public class OllamaService implements LlmProvider {
     public long getTimeoutSeconds() {
         return timeoutSeconds;
     }
+
+    /**
+     * Diagnostic snapshot of the local Ollama installation: which models
+     * are pulled, whether the configured model is among them, and a
+     * suggested {@code ollama pull} command when it isn't. Used by
+     * {@code GET /api/llm/ollama/test} so the user can see the real
+     * state in the browser without running CLI commands.
+     */
+    public OllamaProbe probe() {
+        OllamaProbe out = new OllamaProbe();
+        out.ollamaUrl = ollamaUrl;
+        out.configuredModel = modelName;
+        out.timeoutSeconds = timeoutSeconds;
+        long started = System.currentTimeMillis();
+        try {
+            String body = restTemplate.getForObject(ollamaUrl + "/api/tags", String.class);
+            out.latencyMs = System.currentTimeMillis() - started;
+            if (body == null || body.isBlank()) {
+                out.reachable = false;
+                out.error = "empty /api/tags response";
+                return out;
+            }
+            out.reachable = true;
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode models = root.path("models");
+            if (models.isArray()) {
+                for (JsonNode m : models) {
+                    String name = m.path("name").asText("");
+                    if (!name.isBlank()) {
+                        // Ollama returns names like "llama3:latest" — we
+                        // store them as-is and do an exact + prefix match
+                        // below so the user knows whether "minimax-m3"
+                        // matches "minimax-m3:latest" or similar.
+                        out.availableModels.add(name);
+                    }
+                }
+            }
+            String configured = modelName;
+            // Treat "<name>" as matching "<name>:<anything>" and vice-versa.
+            for (String available : out.availableModels) {
+                if (available.equals(configured)
+                        || available.startsWith(configured + ":")
+                        || configured.startsWith(available + ":")) {
+                    out.modelPresent = true;
+                    out.matchedAs = available;
+                    break;
+                }
+            }
+            if (!out.modelPresent) {
+                out.suggestedCommand = "ollama pull " + configured;
+            }
+            return out;
+        } catch (Exception e) {
+            out.latencyMs = System.currentTimeMillis() - started;
+            out.reachable = false;
+            out.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            return out;
+        }
+    }
+
+    /** Snapshot returned by {@link #probe()}. All fields are JSON-friendly. */
+    public static class OllamaProbe {
+        public String ollamaUrl;
+        public String configuredModel;
+        public long timeoutSeconds;
+        public boolean reachable;
+        public long latencyMs;
+        public String error;
+        public java.util.List<String> availableModels = new java.util.ArrayList<>();
+        public boolean modelPresent;
+        public String matchedAs;
+        public String suggestedCommand;
+    }
 }
 

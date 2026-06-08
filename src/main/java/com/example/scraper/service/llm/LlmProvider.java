@@ -33,4 +33,14 @@ public interface LlmProvider {
 
     /** Quick liveness probe. Used by the dashboard to render provider state. */
     boolean isAvailable();
+
+    /**
+     * Short human-readable reason why {@link #isAvailable()} is false.
+     * Returned to the UI so the user knows whether to set an env var,
+     * flip a config flag, or start a local server. Implementations
+     * should NOT include the actual API key. May be empty.
+     */
+    default String unavailableReason() {
+        return "";
+    }
 }

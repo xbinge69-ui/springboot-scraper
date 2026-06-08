@@ -1,6 +1,7 @@
 package com.example.scraper.service;
 
 import com.example.scraper.model.PipelineOutcome;
+import com.example.scraper.model.PipelineStats;
 import com.example.scraper.model.VideoCatalogEntry;
 import com.example.scraper.service.llm.LlmProvider;
 import com.example.scraper.util.HttpVideoDownloader;
@@ -141,7 +142,19 @@ public class VideoEnrichmentService {
      *                   MiniMax's hosted API instead of local Ollama.
      */
     public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata, boolean useMinimax) throws IOException {
-        return enrich(source, metadata, useMinimax, null, null);
+        return enrich(source, metadata, useMinimax, false, null, null);
+    }
+
+    /**
+     * Backwards-compatible overload that adds a {@code skipLlm} flag.
+     * When {@code skipLlm} is true, the Topical Authority call is
+     * skipped entirely and the entry is persisted with the user's
+     * metadata as-is. No LLM call, no fallback warning, no Ollama
+     * round-trip — saves 2-10s per video on bulk runs.
+     */
+    public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
+                                  boolean useMinimax, boolean skipLlm) throws IOException {
+        return enrich(source, metadata, useMinimax, skipLlm, null, null);
     }
 
     /**
@@ -155,6 +168,20 @@ public class VideoEnrichmentService {
      */
     public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
                                   boolean useMinimax,
+                                  com.example.scraper.model.PipelineJob job,
+                                  Path previewsDir) throws IOException {
+        return enrich(source, metadata, useMinimax, false, job, previewsDir);
+    }
+
+    /**
+     * Full-fat overload. When {@code skipLlm} is true, the LLM
+     * Topical Authority step is skipped and the entry is persisted
+     * with the user's metadata as-is. Skipping saves the 2-10s LLM
+     * round-trip per video (and avoids the "LLM unavailable" warning
+     * when the local model isn't pulled).
+     */
+    public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
+                                  boolean useMinimax, boolean skipLlm,
                                   com.example.scraper.model.PipelineJob job,
                                   Path previewsDir) throws IOException {
         if (job != null) job.markRunning("Resolving source");
@@ -209,6 +236,32 @@ public class VideoEnrichmentService {
         }
         if (job != null) job.updateProgress(70, "Uploading derivatives to CDN");
 
+        // ----- Step 3c: snapshot file sizes for the end-of-run summary -----
+        // We read the sizes here (before upload) because the local files
+        // are deleted right after the Bunny uploads, and the local file
+        // size is what the user actually wants to see — not the
+        // re-compressed-on-CDN byte count. The previewsDir files live
+        // longer (they're for the UI), so their totals are computed
+        // there as well.
+        PipelineStats stats = new PipelineStats();
+        stats.setInputDurationSeconds(probe.durationSeconds());
+        stats.setInputBytes(safeSize(inputPath));
+        stats.setCompressedBytes(safeSize(derivatives.compressedPath()));
+        stats.setPreviewBytes(safeSize(derivatives.previewPath()));
+        stats.setThumbnailBytes(safeSize(derivatives.thumbnailPath()));
+        stats.setVideoEncoder(ffmpeg.currentEncoderName());
+        stats.setHardwareAccelerated(ffmpeg.isHardwareAccelerated());
+        stats.setPreviewClipCount(previewClipPaths.size());
+        if (!previewClipPaths.isEmpty()) {
+            long total = 0L;
+            int counted = 0;
+            for (Path p : previewClipPaths) {
+                long s = safeSize(p);
+                if (s > 0) { total += s; counted++; }
+            }
+            stats.setPreviewClipsTotalBytes(counted > 0 ? total : -1L);
+        }
+
         // ----- Steps 4-5: upload all 3 derivatives to Bunny (the only CDN) -----
         String slugHint = Slugify.slugify(metadata.titleOrFallback());
         String uuid = BunnyAssetService.newRequestUuid();
@@ -235,23 +288,30 @@ public class VideoEnrichmentService {
         // model so it's trivial to remove later.
         String backupEmbedUrl = compressedUrl;
 
-        // ----- Step 7: LLM Topical Authority pass -----
+        // ----- Step 7: LLM Topical Authority pass (skipped when skipLlm=true) -----
         TopicalAuthorityResult llm;
-        LlmProvider provider = (useMinimax && minimax != null && minimax.isAvailable())
-                ? minimax
-                : ollama;
-        try {
-            String summary = catalog.summarize();
-            String prompt = TopicalAuthorityPrompt.buildPrompt(metadata, summary);
-            Map<String, Object> options = Map.of(
-                    "format", ollamaFormat,
-                    "temperature", ollamaTemperature
-            );
-            String raw = provider.generate(prompt, options);
-            llm = TopicalAuthorityPrompt.parse(raw, metadata);
-        } catch (Exception e) {
-            warnings.add("LLM (" + provider.name() + ") unavailable; fallback metadata used: " + e.getMessage());
+        if (skipLlm) {
+            // Use the input metadata verbatim. No LLM call, no warning.
+            // Slug is derived from the title by the fallback helper.
             llm = TopicalAuthorityPrompt.parse(null, metadata);
+            log.info("LLM enrichment skipped (skipLlm=true) — using user metadata as-is");
+        } else {
+            LlmProvider provider = (useMinimax && minimax != null && minimax.isAvailable())
+                    ? minimax
+                    : ollama;
+            try {
+                String summary = catalog.summarize();
+                String prompt = TopicalAuthorityPrompt.buildPrompt(metadata, summary);
+                Map<String, Object> options = Map.of(
+                        "format", ollamaFormat,
+                        "temperature", ollamaTemperature
+                );
+                String raw = provider.generate(prompt, options);
+                llm = TopicalAuthorityPrompt.parse(raw, metadata);
+            } catch (Exception e) {
+                warnings.add("LLM (" + provider.name() + ") unavailable; fallback metadata used: " + e.getMessage());
+                llm = TopicalAuthorityPrompt.parse(null, metadata);
+            }
         }
         if (job != null) job.updateProgress(92, "Saving to catalog");
 
@@ -271,6 +331,7 @@ public class VideoEnrichmentService {
         entry.setActressId(metadata.actressId());
         entry.setUnknownActressName(metadata.unknownActressNameOrFallback());
         entry.setViews(llm.views());
+        entry.setStats(stats);
 
         VideoCatalogEntry saved;
         try {
@@ -284,7 +345,9 @@ public class VideoEnrichmentService {
         // Stash the clip paths in the outcome's job so the controller can
         // return them; we keep them on the PipelineJob itself (set by the
         // controller after this method returns) — see ScraperController.
-        return new PipelineOutcome(saved, warnings);
+        PipelineOutcome outcome = new PipelineOutcome(saved, warnings);
+        outcome.setStats(stats);
+        return outcome;
     }
 
     // ---- helpers ----
@@ -312,6 +375,20 @@ public class VideoEnrichmentService {
 
     @FunctionalInterface
     private interface FfmpegCall<T> { T call() throws Exception; }
+
+    /**
+     * Best-effort file size lookup. Returns -1 when the file is missing
+     * or unreadable so the caller can distinguish "not measured" from
+     * "zero bytes" (both are possible in the wild).
+     */
+    private static long safeSize(Path p) {
+        if (p == null) return -1L;
+        try {
+            return Files.size(p);
+        } catch (IOException e) {
+            return -1L;
+        }
+    }
 
     private static void deleteRecursively(Path root) {
         if (root == null || !Files.exists(root)) return;

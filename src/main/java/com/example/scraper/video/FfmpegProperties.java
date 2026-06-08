@@ -40,6 +40,11 @@ public class FfmpegProperties {
     // Preview clips (5×25s)
     private final int previewClipSeconds;
     private final double[] previewClipPositions;
+    // GPU acceleration
+    private final boolean gpuEnabled;
+    private final String gpuPreference;
+    // Codec (H.264 or HEVC)
+    private final Codec codec;
 
     public FfmpegProperties(
             @Value("${app.ffmpeg.path:ffmpeg}") String ffmpegPath,
@@ -62,7 +67,10 @@ public class FfmpegProperties {
             @Value("${app.ffmpeg.watermark.box-border:6}") int watermarkBoxBorder,
             @Value("${app.ffmpeg.watermark.margin:12}") int watermarkMargin,
             @Value("${app.ffmpeg.preview-clip-seconds:25}") int previewClipSeconds,
-            @Value("${app.ffmpeg.preview-clip-positions:0.05,0.35,0.50,0.65,0.95}") double[] previewClipPositions) {
+            @Value("${app.ffmpeg.preview-clip-positions:0.05,0.35,0.50,0.65,0.95}") double[] previewClipPositions,
+            @Value("${app.ffmpeg.gpu.enabled:true}") boolean gpuEnabled,
+            @Value("${app.ffmpeg.gpu.preference:nvidia,intel,amd}") String gpuPreference,
+            @Value("${app.ffmpeg.codec:h264}") String codec) {
         this.ffmpegPath = ffmpegPath;
         this.ffprobePath = ffprobePath;
         this.previewDurationSeconds = previewDurationSeconds;
@@ -86,6 +94,9 @@ public class FfmpegProperties {
         this.previewClipPositions = previewClipPositions == null || previewClipPositions.length == 0
                 ? new double[]{0.05, 0.35, 0.50, 0.65, 0.95}
                 : previewClipPositions;
+        this.gpuEnabled = gpuEnabled;
+        this.gpuPreference = gpuPreference == null ? "nvidia,intel,amd" : gpuPreference;
+        this.codec = Codec.fromConfig(codec);
     }
 
     public String getFfmpegPath() { return ffmpegPath; }
@@ -109,4 +120,7 @@ public class FfmpegProperties {
     public int getWatermarkMargin() { return watermarkMargin; }
     public int getPreviewClipSeconds() { return previewClipSeconds; }
     public double[] getPreviewClipPositions() { return previewClipPositions; }
+    public boolean isGpuEnabled() { return gpuEnabled; }
+    public String getGpuPreference() { return gpuPreference; }
+    public Codec getCodec() { return codec; }
 }

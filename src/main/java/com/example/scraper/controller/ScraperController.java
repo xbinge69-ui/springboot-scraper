@@ -12,8 +12,10 @@ import com.example.scraper.service.OllamaService;
 import com.example.scraper.service.VideoEnrichmentService;
 import com.example.scraper.service.VideoIngestionPipelineService;
 import com.example.scraper.service.VideoScraperService;
+import com.example.scraper.video.Codec;
 import com.example.scraper.video.EnrichmentMetadata;
 import com.example.scraper.video.EnrichmentSource;
+import com.example.scraper.video.GpuEncoderProbe;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -48,6 +50,8 @@ public class ScraperController {
     private final OllamaService ollama;
     private final com.example.scraper.service.llm.MinimaxChatProvider minimax;
     private final PipelineJobService pipelineJobService;
+    private final GpuEncoderProbe gpuEncoderProbe;
+    private final com.example.scraper.video.FfmpegProperties ffmpegProperties;
 
     public ScraperController(ScraperService scraperService,
                              VideoScraperService videoScraperService,
@@ -56,7 +60,9 @@ public class ScraperController {
                              PageInfoService pageInfoService,
                              OllamaService ollama,
                              com.example.scraper.service.llm.MinimaxChatProvider minimax,
-                             PipelineJobService pipelineJobService) {
+                             PipelineJobService pipelineJobService,
+                             GpuEncoderProbe gpuEncoderProbe,
+                             com.example.scraper.video.FfmpegProperties ffmpegProperties) {
         this.scraperService = scraperService;
         this.videoScraperService = videoScraperService;
         this.videoIngestionPipelineService = videoIngestionPipelineService;
@@ -65,6 +71,8 @@ public class ScraperController {
         this.ollama = ollama;
         this.minimax = minimax;
         this.pipelineJobService = pipelineJobService;
+        this.gpuEncoderProbe = gpuEncoderProbe;
+        this.ffmpegProperties = ffmpegProperties;
     }
 
     @GetMapping("/")
@@ -274,8 +282,154 @@ public class ScraperController {
         boolean minimaxConfigured = minimax != null && minimax.isAvailable();
         java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("ollama", java.util.Map.of("name", "ollama", "available", ollamaUp));
-        out.put("minimax", java.util.Map.of("name", "minimax-chat", "available", minimaxConfigured));
+        out.put("minimax", java.util.Map.of(
+                "name", "minimax-chat",
+                "available", minimaxConfigured,
+                // Surfaced verbatim to the UI so the user knows whether to
+                // set the env var, flip `app.minimax.enabled`, or both.
+                "reason", minimaxConfigured
+                        ? "configured"
+                        : (minimax == null
+                            ? "not on classpath"
+                            : minimax.unavailableReason())));
         out.put("defaultProvider", minimaxConfigured ? "minimax-chat" : "ollama");
+        return out;
+    }
+
+    /**
+     * Active probe of the MiniMax provider. Sends a 1-token ping and
+     * returns MiniMax's raw status_code + status_msg from
+     * {@code base_resp}, plus a 60-char snippet of the model reply when
+     * the call succeeds. Use this when auth fails — it tells you
+     * whether the key is bad, the model name is bad, the endpoint is
+     * wrong, or MiniMax is down.
+     */
+    @GetMapping("/api/llm/minimax/test")
+    @ResponseBody
+    public java.util.Map<String, Object> testMinimax() {
+        if (minimax == null) {
+            return java.util.Map.of(
+                    "ok", false,
+                    "message", "MinimaxChatProvider not on the classpath");
+        }
+        com.example.scraper.service.llm.MinimaxChatProvider.PingResult r = minimax.ping();
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", r.ok());
+        out.put("httpStatus", r.httpStatus());
+        out.put("baseRespCode", r.baseRespCode());
+        out.put("baseRespMsg", r.baseRespMsg());
+        out.put("replySnippet", r.replySnippet());
+        out.put("latencyMs", r.latencyMs());
+        out.put("context", r.context());
+        return out;
+    }
+
+    /**
+     * Active probe of the local Ollama installation. Lists the pulled
+     * models, checks whether the configured model is among them, and
+     * suggests the {@code ollama pull <name>} command when it isn't.
+     * Use this when a pipeline run logs "model 'xxx' not found" — the
+     * browser answer is the same info, no shell required.
+     */
+    @GetMapping("/api/llm/ollama/test")
+    @ResponseBody
+    public java.util.Map<String, Object> testOllama() {
+        com.example.scraper.service.OllamaService.OllamaProbe p = ollama.probe();
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", p.reachable && p.modelPresent);
+        out.put("reachable", p.reachable);
+        out.put("ollamaUrl", p.ollamaUrl);
+        out.put("configuredModel", p.configuredModel);
+        out.put("modelPresent", p.modelPresent);
+        out.put("matchedAs", p.matchedAs);
+        out.put("availableModels", p.availableModels);
+        out.put("latencyMs", p.latencyMs);
+        out.put("error", p.error);
+        out.put("suggestedCommand", p.suggestedCommand);
+        if (!p.reachable) {
+            out.put("message", "Ollama is not reachable at " + p.ollamaUrl
+                    + (p.error == null ? "" : " — " + p.error));
+        } else if (!p.modelPresent) {
+            out.put("message", "Model '" + p.configuredModel
+                    + "' is not pulled. Run: " + p.suggestedCommand);
+        } else {
+            out.put("message", "Ollama OK — model '" + p.matchedAs + "' is ready");
+        }
+        return out;
+    }
+
+    /**
+     * Diagnostic snapshot of the ffmpeg GPU encoder probe. Returns the
+     * ffmpeg binary path, whether GPU is enabled, the full list of GPU
+     * encoders ffmpeg exposes, and the per-codec selection the probe
+     * will use. The probe runs once at {@code @PostConstruct} time
+     * and this endpoint just reads the cached result — no subprocess
+     * spawn, no re-probe, cheap to call.
+     *
+     * <p>Used by the pipeline page's "GPU status" panel so the user
+     * can see, at a glance, whether their ffmpeg build supports NVENC
+     * / QSV / AMF and which one will be used for the next encode.
+     */
+    @GetMapping("/api/ffmpeg/test")
+    @ResponseBody
+    public java.util.Map<String, Object> testFfmpeg() {
+        GpuEncoderProbe.Snapshot snap = gpuEncoderProbe.snapshot();
+
+        // Render the per-codec selection into a JSON-friendly map.
+        java.util.Map<String, Object> selectedMap = new java.util.LinkedHashMap<>();
+        for (Codec codec : Codec.values()) {
+            GpuEncoderProbe.Detection d = snap.selectedByCodec().get(codec);
+            if (d != null) {
+                java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+                entry.put("vendor", d.vendor.name());
+                entry.put("encoder", d.encoderName);
+                selectedMap.put(codec.label, entry);
+            } else {
+                selectedMap.put(codec.label, null);
+            }
+        }
+        // Plain list of (vendor, codec, encoder) for the UI to render.
+        java.util.List<java.util.Map<String, Object>> availableList = new java.util.ArrayList<>();
+        for (GpuEncoderProbe.Detection d : snap.available()) {
+            java.util.Map<String, Object> entry = new java.util.LinkedHashMap<>();
+            entry.put("vendor", d.vendor.name());
+            entry.put("codec", d.codec.label);
+            entry.put("encoder", d.encoderName);
+            availableList.add(entry);
+        }
+
+        // The actual codec the next encode will use + the encoder name
+        // the orchestrator will write to the catalog. Lets the UI say
+        // "next encode: hevc_nvenc (GPU)" or "next encode: libx264
+        // (CPU) — no GPU encoder found" without ambiguity.
+        Codec activeCodec = ffmpegProperties.getCodec();
+        GpuEncoderProbe.Detection activePick = snap.selectedByCodec().get(activeCodec);
+        String nextEncoder = activePick != null ? activePick.encoderName : activeCodec.softwareEncoder;
+        boolean nextIsGpu = activePick != null;
+
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("ok", nextIsGpu || !snap.available().isEmpty());
+        out.put("ffmpegPath", snap.ffmpegPath());
+        out.put("gpuEnabled", snap.gpuEnabled());
+        out.put("preferenceOrder", snap.preferenceOrder());
+        out.put("activeCodec", activeCodec.label);
+        out.put("nextEncoder", nextEncoder);
+        out.put("nextIsGpu", nextIsGpu);
+        out.put("available", availableList);
+        out.put("selected", selectedMap);
+        if (!snap.gpuEnabled()) {
+            out.put("message", "GPU encoding disabled by config (app.ffmpeg.gpu.enabled=false) — will use "
+                    + activeCodec.softwareEncoder);
+        } else if (snap.available().isEmpty()) {
+            out.put("message", "ffmpeg at '" + snap.ffmpegPath() + "' exposes NO hardware H.264/HEVC "
+                    + "encoders — install an ffmpeg build with NVENC/QSV/AMF (e.g. BtbN's gpl build) to enable GPU");
+        } else if (activePick == null) {
+            out.put("message", "GPU encoders found (" + snap.available().size()
+                    + ") but none for the active codec (" + activeCodec.label + "). Try setting "
+                    + "app.ffmpeg.codec=h264 to use the H.264 GPU encoders instead.");
+        } else {
+            out.put("message", "Will encode with " + nextEncoder + " (GPU) for codec=" + activeCodec.label);
+        }
         return out;
     }
 
@@ -305,6 +459,7 @@ public class ScraperController {
             throw new IllegalArgumentException("urls is required (non-empty list)");
         }
         boolean useMinimax = Boolean.TRUE.equals(body.useMinimax());
+        boolean skipLlm = Boolean.TRUE.equals(body.skipLlm());
         List<Map<String, Object>> results = new ArrayList<>();
         for (String url : body.urls()) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -325,14 +480,22 @@ public class ScraperController {
                 req.setDescription(info.getDescription());
                 req.setTags(String.join(",", info.getTags()));
                 req.setCategory(info.getCategory().isBlank() ? "Amateur" : info.getCategory());
-                req.setUnknownActressName(info.getActress().isBlank() ? "Anonymous" : info.getActress());
+                // Prefer the first performer from the typed list (xhamster
+                // provides pornstars with avatars). Fall back to the legacy
+                // single-actress field, then "Anonymous".
+                String firstPerformer = info.getPornstars().isEmpty()
+                        ? info.getActress()
+                        : info.getPornstars().get(0);
+                req.setUnknownActressName(firstPerformer.isBlank() ? "Anonymous" : firstPerformer);
                 req.setActressId(null);
                 req.setViews(0L);
                 req.setUseMinimax(useMinimax);
+                req.setSkipLlm(skipLlm);
                 // Step 3: run the pipeline
                 PipelineOutcome outcome = videoIngestionPipelineService.ingestFromPageUrl(req);
                 row.put("entry", outcome.getEntry());
                 row.put("warnings", outcome.getWarnings());
+                row.put("stats", outcome.getStats());
             } catch (Exception e) {
                 row.put("error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             }
@@ -342,7 +505,7 @@ public class ScraperController {
     }
 
     /** Request body for {@code POST /api/video/pipeline/batch}. */
-    public record BatchPipelineRequest(List<String> urls, Boolean useMinimax) {}
+    public record BatchPipelineRequest(List<String> urls, Boolean useMinimax, Boolean skipLlm) {}
 
     /**
      * Multipart upload → enrich. The uploaded file is streamed to a temp

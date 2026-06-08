@@ -163,9 +163,25 @@
             <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
                 <label style="display:flex; align-items:center; gap:.5rem; margin:0; font-weight:600; cursor:pointer;">
                     <input id="useMinimax" name="useMinimax" type="checkbox" style="width:auto;"/>
-                    <span>🧠 Use MiniMax for the Topical Authority LLM pass (overrides local Ollama)</span>
+                    <span>🧠 Use <strong>Minimax</strong> hosted API for the LLM pass (off by default — uses local Ollama <code>minimax-m3</code> otherwise)</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:.5rem; margin:.5rem 0 0; font-weight:600; cursor:pointer;">
+                    <input id="skipLlm" name="skipLlm" type="checkbox" style="width:auto;"/>
+                    <span>⏭️ <strong>Skip LLM enrichment</strong> — save your own metadata verbatim (no Ollama/Minimax call, 2-10s faster per video)</span>
                 </label>
                 <p id="llmStatus" class="hint" style="margin:.4rem 0 0;">Checking LLM providers...</p>
+            </div>
+
+            <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                    <strong>🎬 ffmpeg / GPU encoder</strong>
+                    <button type="button" id="ffmpegRefreshBtn" class="btn secondary" style="font-size:.75rem; padding:.2rem .6rem;">↻ Re-probe</button>
+                </div>
+                <p id="ffmpegSummary" class="hint" style="margin:.4rem 0;">Probing ffmpeg GPU encoders...</p>
+                <details style="margin-top:.4rem;">
+                    <summary style="cursor:pointer; font-size:.85rem; color:#94a3b8;">Show details</summary>
+                    <div id="ffmpegDetails" style="font-size:.8rem; font-family:monospace; padding:.4rem; background:#020617; border-radius:4px; margin-top:.4rem; white-space:pre-wrap;"></div>
+                </details>
             </div>
 
             <button id="runBtn" class="btn success" type="submit">🚀 Run Pipeline</button>
@@ -216,7 +232,11 @@
     const runError    = document.getElementById('runError');
     const runSuccess  = document.getElementById('runSuccess');
     const useMinimax  = document.getElementById('useMinimax');
+    const skipLlm     = document.getElementById('skipLlm');
     const llmStatus   = document.getElementById('llmStatus');
+    const ffmpegSummary  = document.getElementById('ffmpegSummary');
+    const ffmpegDetails  = document.getElementById('ffmpegDetails');
+    const ffmpegRefresh  = document.getElementById('ffmpegRefreshBtn');
 
     const progressWrap = document.getElementById('progressWrap');
     const progressFill = document.getElementById('progressFill');
@@ -238,18 +258,107 @@
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const s = await r.json();
             const ollamaUp = !!(s.ollama && s.ollama.available);
-            const minimaxOn = !!(s.minimax && s.minimax.available);
+            const minimaxInfo = s.minimax || {};
+            const minimaxOn = !!minimaxInfo.available;
             if (!minimaxOn) {
                 useMinimax.disabled = true;
                 useMinimax.checked = false;
             }
             llmStatus.textContent =
                 'Ollama: ' + (ollamaUp ? '✅ reachable' : '❌ not reachable') +
-                '   ·   MiniMax: ' + (minimaxOn ? '✅ configured' : '⚠️ no API key (set MINIMAX_API_KEY)');
+                '   ·   MiniMax: ' + (minimaxOn
+                    ? '✅ configured'
+                    : '⚠️ ' + (minimaxInfo.reason || 'not configured'));
+
+            // Active probe: see whether Ollama actually has the
+            // configured model pulled. "Reachable" is not enough — the
+            // /api/generate call 404s when the model isn't local. This
+            // probe lists pulled models + suggests the pull command.
+            try {
+                const t = await fetch('/api/llm/ollama/test');
+                const tr = await t.json();
+                if (tr.ok) {
+                    llmStatus.textContent +=
+                        '  ·  Ollama model: ✅ ' + tr.matchedAs + ' (' + tr.latencyMs + 'ms)';
+                } else if (tr.reachable) {
+                    llmStatus.textContent +=
+                        '  ·  Ollama model: ❌ ' + tr.message
+                        + (tr.suggestedCommand ? '   (try: ' + tr.suggestedCommand + ')' : '');
+                } else {
+                    llmStatus.textContent += '  ·  Ollama model: ❌ ' + tr.message;
+                }
+            } catch (_) { /* best-effort */ }
+
+            // Active probe: when the MiniMax provider is "configured"
+            // we still ping it because the key can be wrong / expired /
+            // wrong format. The endpoint returns MiniMax's actual
+            // base_resp status_code + status_msg.
+            if (minimaxOn) {
+                try {
+                    const t = await fetch('/api/llm/minimax/test');
+                    const tr = await t.json();
+                    if (tr.ok) {
+                        llmStatus.textContent += '  ·  MiniMax ping: ✅ (' + tr.latencyMs + 'ms)';
+                    } else {
+                        let verdict = '⚠️ ping failed';
+                        if (tr.baseRespCode) {
+                            verdict = '❌ base_resp ' + tr.baseRespCode + ': ' + tr.baseRespMsg;
+                        } else if (tr.baseRespMsg) {
+                            verdict = '❌ ' + tr.baseRespMsg;
+                        }
+                        llmStatus.textContent += '  ·  MiniMax ping: ' + verdict;
+                        useMinimax.disabled = true;
+                        useMinimax.checked = false;
+                    }
+                } catch (_) { /* best-effort */ }
+            }
         } catch (err) {
             llmStatus.textContent = 'Could not reach /api/llm/status: ' + err.message;
         }
     })();
+
+    // ---- Step 0: ffmpeg / GPU probe ----
+    async function refreshFfmpegStatus() {
+        ffmpegSummary.textContent = 'Probing ffmpeg GPU encoders…';
+        try {
+            const r = await fetch('/api/ffmpeg/test');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const t = await r.json();
+            // Top-line summary: "✅ next encode: hevc_nvenc (GPU, NVIDIA)
+            // via ffmpeg.exe" or "❌ no GPU — will use libx264 (CPU)".
+            const enc = t.nextEncoder || '?';
+            const isGpu = t.nextIsGpu;
+            const summary = (isGpu ? '✅ ' : '❌ ')
+                + 'next encode: ' + enc
+                + (isGpu ? ' (GPU ✅)' : ' (CPU) ')
+                + '· codec=' + (t.activeCodec || '?')
+                + ' · ffmpeg: ' + (t.ffmpegPath || '?');
+            ffmpegSummary.textContent = summary;
+            // Details block: the full message + everything the probe saw.
+            const avail = (t.available || []);
+            const availStr = avail.length === 0
+                ? '   (none)'
+                : avail.map(d => '   · ' + d.vendor + ' ' + d.codec + ' → ' + d.encoder).join('\n');
+            const sel = t.selected || {};
+            const selStr = Object.keys(sel).length === 0
+                ? '   (none)'
+                : Object.keys(sel).map(k => '   · ' + k + ' → ' + (sel[k] ? sel[k].vendor + ' / ' + sel[k].encoder : '(none)')).join('\n');
+            ffmpegDetails.textContent =
+                (t.message || '(no message)') + '\n\n'
+                + 'ffmpeg path:       ' + (t.ffmpegPath || '?') + '\n'
+                + 'GPU enabled:       ' + (t.gpuEnabled ? 'yes' : 'no') + '\n'
+                + 'GPU preference:    ' + (t.preferenceOrder || '?') + '\n'
+                + 'Active codec:      ' + (t.activeCodec || '?') + '\n'
+                + 'Next encoder:      ' + enc + (isGpu ? ' (GPU)' : ' (CPU)') + '\n'
+                + '\nAvailable GPU encoders (' + avail.length + '):\n' + availStr
+                + '\n\nSelected per codec:\n' + selStr;
+        } catch (err) {
+            ffmpegSummary.textContent = '❌ could not reach /api/ffmpeg/test: ' + err.message;
+            ffmpegDetails.textContent = '';
+        }
+    }
+    if (ffmpegRefresh) ffmpegRefresh.addEventListener('click', refreshFfmpegStatus);
+    refreshFfmpegStatus();
 
     // ---- Step 1: grab info ----
     grabBtn.addEventListener('click', async () => {
@@ -293,7 +402,13 @@
         if (Array.isArray(info.tags) && info.tags.length)
             form.tags.value    = info.tags.join(',');
         if (info.category)     form.category.value             = info.category;
-        if (info.actress)      form.unknownActressName.value   = info.actress;
+        // Performer (pornstar/actress) selection: prefer the typed list
+        // (returned by site-specific extractors like xhamster's). Fall
+        // back to the legacy single-string `actress` field.
+        const performer = (Array.isArray(info.pornstars) && info.pornstars.length)
+            ? info.pornstars[0]
+            : (info.actress || '');
+        if (performer) form.unknownActressName.value = performer;
     }
 
     // ---- Step 2: run pipeline (async) ----
@@ -314,7 +429,8 @@
             unknownActressName: form.unknownActressName.value,
             actressId: form.actressId.value,
             views: form.views.value ? Number(form.views.value) : 0,
-            useMinimax: !!useMinimax.checked
+            useMinimax: !!useMinimax.checked,
+            skipLlm: !!skipLlm.checked
         };
 
         try {
@@ -392,8 +508,23 @@
         progressText.textContent = '100% — Complete';
         const result = snap.result || {};
         const entry  = result.entry || {};
+        const stats  = result.stats || {};
         output.textContent = JSON.stringify(result, null, 2);
-        runSuccess.textContent = '✅ Pipeline complete — catalog id: ' + (entry.id || '?');
+        // Compose a one-liner: "✅ done — id X · input 142 MB → compressed 18 MB
+        // (12.7%) via h264_nvenc (GPU)". The user wanted to see this on
+        // every run; falls back to a plain "done" if stats are missing
+        // (e.g. the orchestrator predates this change).
+        let summary = '✅ Pipeline complete — catalog id: ' + (entry.id || '?');
+        if (stats && (stats.inputBytes > 0 || stats.compressedBytes > 0)) {
+            const inMB  = stats.inputBytes     > 0 ? (stats.inputBytes     / 1048576).toFixed(1) + ' MB' : '?';
+            const outMB = stats.compressedBytes > 0 ? (stats.compressedBytes / 1048576).toFixed(1) + ' MB' : '?';
+            const pct   = stats.compressedPctOfInput > 0 ? ' (' + stats.compressedPctOfInput + '% of input)' : '';
+            const enc   = stats.videoEncoder
+                ? ' via ' + stats.videoEncoder + (stats.hardwareAccelerated ? ' (GPU ✅)' : ' (CPU)')
+                : '';
+            summary += '   ·   ' + inMB + ' → ' + outMB + pct + enc;
+        }
+        runSuccess.textContent = summary;
         runSuccess.style.display = 'block';
 
         // Main video (Bunny CDN URL)

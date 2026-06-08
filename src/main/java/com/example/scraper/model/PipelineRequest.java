@@ -12,6 +12,14 @@ public class PipelineRequest {
     private Long views;
     /** When true, the LLM enrichment step uses MiniMax instead of local Ollama. */
     private Boolean useMinimax;
+    /**
+     * When true, the LLM enrichment step is skipped entirely. The entry
+     * is persisted with the user-supplied metadata as-is (title,
+     * description, category, tags, slug from the title). Useful for
+     * fast bulk runs where the user has already polished the metadata
+     * and doesn't want a 2-10s LLM call per video.
+     */
+    private Boolean skipLlm;
 
     public String getSourcePageUrl() { return sourcePageUrl; }
     public void setSourcePageUrl(String sourcePageUrl) { this.sourcePageUrl = sourcePageUrl; }
@@ -39,5 +47,8 @@ public class PipelineRequest {
 
     public Boolean getUseMinimax() { return useMinimax; }
     public void setUseMinimax(Boolean useMinimax) { this.useMinimax = useMinimax; }
+
+    public Boolean getSkipLlm() { return skipLlm; }
+    public void setSkipLlm(Boolean skipLlm) { this.skipLlm = skipLlm; }
 }
 

@@ -71,6 +71,7 @@ public class VideoIngestionPipelineService {
                 new EnrichmentSource.RemoteUrl(sourceVideoUrl, request.getSourcePageUrl()),
                 meta,
                 Boolean.TRUE.equals(request.getUseMinimax()),
+                Boolean.TRUE.equals(request.getSkipLlm()),
                 job,
                 previewsDir);
     }

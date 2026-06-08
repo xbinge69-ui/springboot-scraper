@@ -23,6 +23,13 @@ public class VideoCatalogEntry {
     private String actressId;
     private String unknownActressName;
     private long views;
+    /**
+     * Optional per-entry pipeline stats: input size, compressed size,
+     * encoder used. Populated at the end of the pipeline; persisted
+     * to {@code videos.json} so the catalog carries a record of how
+     * much each entry was compressed. Null for legacy entries.
+     */
+    private PipelineStats stats;
 
     public VideoCatalogEntry() {
     }
@@ -71,4 +78,7 @@ public class VideoCatalogEntry {
 
     public long getViews() { return views; }
     public void setViews(long views) { this.views = views; }
+
+    public PipelineStats getStats() { return stats; }
+    public void setStats(PipelineStats stats) { this.stats = stats; }
 }

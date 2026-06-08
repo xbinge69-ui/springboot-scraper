@@ -101,7 +101,8 @@ class VideoEnrichmentServiceTest {
                         28, "fast", 23, "medium", 2,
                         "Spankycouples.com",
                         18, 24, 0.85, "black@0.4", 6, 12,
-                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenReturn("""
@@ -189,7 +190,8 @@ class VideoEnrichmentServiceTest {
                         28, "fast", 23, "medium", 2,
                         "Spankycouples.com",
                         18, 24, 0.85, "black@0.4", 6, 12,
-                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenThrow(new RuntimeException("Ollama offline"));
@@ -236,7 +238,8 @@ class VideoEnrichmentServiceTest {
                         28, "fast", 23, "medium", 2,
                         "Spankycouples.com",
                         18, 24, 0.85, "black@0.4", 6, 12,
-                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95}));
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
 
         OllamaService ollama = mock(OllamaService.class);
         when(ollama.generate(anyString(), any())).thenReturn("{}");
