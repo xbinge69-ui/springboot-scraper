@@ -208,23 +208,25 @@ public class VideoEnrichmentService {
         }
         if (job != null) job.updateProgress(10, "Probing source");
 
-        // ----- Steps 2 + 3: probe + process via ffmpeg, with timeout + semaphore -----
+        // ----- Step 2: probe the source for duration + audio flag -----
         VideoMetadata probe;
-        Derivatives derivatives;
         try {
             probe = runWithTimeout("probe", () -> ffmpeg.probe(inputPath), ffmpegTimeoutSeconds);
-            if (job != null) job.updateProgress(15, "Compressing video (watermark)");
-            Path derivedDir = tempDir.resolve("derivatives");
-            derivatives = runWithTimeout("process",
-                    () -> ffmpeg.process(inputPath, derivedDir, "enrich"),
-                    ffmpegTimeoutSeconds * 3);  // process is 3 sub-encodes
         } catch (Exception e) {
             deleteRecursively(tempDir);
-            throw new IOException("ffmpeg stage failed: " + e.getMessage(), e);
+            throw new IOException("ffmpeg probe failed: " + e.getMessage(), e);
         }
-        if (job != null) job.updateProgress(50, "Generating 5 preview clips with watermark");
 
-        // ----- Step 3b: generate 5 watermark-baked preview clips (per-job, if requested) -----
+        // ----- Step 3: generate the 5 watermark-baked mini clips FIRST -----
+        // Reasoning: the mini clips are fast (5 × 25s of already-decoded
+        // source segments, not a full re-encode) and the user sees
+        // them on the result panel right after the pipeline finishes.
+        // Doing them first means a) the heavy 720p re-encode isn't
+        // blocking the "first impression" deliverable, b) if the
+        // re-encode fails for some reason (out of disk, GPU hang) the
+        // clips are already on disk, c) clips are encoded from the
+        // original source — no quality loss from compressing twice.
+        if (job != null) job.updateProgress(15, "Generating 5 preview clips");
         java.util.List<Path> previewClipPaths = new java.util.ArrayList<>();
         if (previewsDir != null) {
             try {
@@ -233,6 +235,19 @@ public class VideoEnrichmentService {
             } catch (Exception e) {
                 warnings.add("Preview clip generation failed: " + e.getMessage());
             }
+        }
+
+        // ----- Step 4: heavy 720p re-encode + 5s preview + thumbnail -----
+        Derivatives derivatives;
+        try {
+            if (job != null) job.updateProgress(40, "Compressing video (watermark)");
+            Path derivedDir = tempDir.resolve("derivatives");
+            derivatives = runWithTimeout("process",
+                    () -> ffmpeg.process(inputPath, derivedDir, "enrich"),
+                    ffmpegTimeoutSeconds * 3);  // process is 3 sub-encodes
+        } catch (Exception e) {
+            deleteRecursively(tempDir);
+            throw new IOException("ffmpeg process failed: " + e.getMessage(), e);
         }
         if (job != null) job.updateProgress(70, "Uploading derivatives to CDN");
 

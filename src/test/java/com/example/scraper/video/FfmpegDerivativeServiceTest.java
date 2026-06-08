@@ -94,6 +94,7 @@ class FfmpegDerivativeServiceTest {
                 "Spankycouples.com",
                 18, 24, 0.85,
                 "black@0.4", 6, 12,
+                "See more SpankyCouples.com", 18,
                 25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
                 true, "nvidia,intel,amd",
                 "h264");  // tests intentionally use the legacy H.264 path

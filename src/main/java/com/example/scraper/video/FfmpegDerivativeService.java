@@ -299,6 +299,46 @@ public class FfmpegDerivativeService {
                 + ":boxborderw=" + props.getWatermarkBoxBorder();
     }
 
+    /**
+     * Filter chain for the 5 mini 25s preview clips: the base scale
+     * chain PLUS a single bottom-center drawtext printing the
+     * configured "see more" string (default "See more
+     * SpankyCouples.com"). The top-right corner watermark is
+     * intentionally NOT included here — those clips are short
+     * previews shown on the pipeline page, and the small top-right
+     * site name is redundant with the bottom-center call-to-action.
+     *
+     * <p>Positioning: centered horizontally ({@code x=(w-tw)/2}),
+     * pinned to the bottom edge with the same margin used for the
+     * corner watermark. Font size defaults to 18 (same as the main
+     * watermark) — large enough to read on a 280px-wide preview card,
+     * small enough to stay subtle.
+     *
+     * <p>If the font is unavailable, this falls back to the plain
+     * scale filter (no drawtext at all) — same graceful-degrade rule
+     * as the corner watermark.
+     */
+    String scaleFilterWithClipOverlay() {
+        String base = scaleFilter();
+        Optional<Path> font = watermarkFont.resolveFontPath();
+        if (font.isEmpty()
+                || props.getClipOverlayText().isBlank()) {
+            return base;
+        }
+        String fontPath = escapeForDrawtext(font.get().toString());
+        String overlayText = escapeForDrawtext(props.getClipOverlayText());
+        int margin = props.getWatermarkMargin();
+        String overlay = ",drawtext=fontfile='" + fontPath
+                + "':text='" + overlayText + "'"
+                + ":fontcolor=white@" + props.getWatermarkOpacity()
+                + ":fontsize=" + props.getClipOverlayFontSize()
+                + ":x=(w-tw)/2"
+                + ":y=h-th-" + margin
+                + ":box=1:boxcolor=" + props.getWatermarkBoxColor()
+                + ":boxborderw=" + props.getWatermarkBoxBorder();
+        return base + overlay;
+    }
+
     /** Escape characters that have special meaning inside an ffmpeg drawtext value. */
     static String escapeForDrawtext(String s) {
         if (s == null) return "";
@@ -378,7 +418,8 @@ public class FfmpegDerivativeService {
 
     /**
      * Build an FFmpeg job for one of the 5 watermark-baked 25s preview clips.
-     * Filter chain is the same as the 5s preview + drawtext watermark.
+     * Filter chain is the same as the 5s preview + drawtext watermark +
+     * a bottom-center "See more SpankyCouples.com" overlay.
      */
     FFmpegBuilder buildClipJob(Path input, Path output,
                                double startSec, double durationSec, boolean hasAudio) {
@@ -387,7 +428,7 @@ public class FfmpegDerivativeService {
                 .setStartOffset((long) (startSec * 1000d), TimeUnit.MILLISECONDS);
         FFmpegOutputBuilder o = b.addOutput(output.toString())
                 .setDuration((long) (durationSec * 1000d), TimeUnit.MILLISECONDS)
-                .setVideoFilter(scaleFilterWithWatermark(props.getWatermarkFontSizeClip()))
+                .setVideoFilter(scaleFilterWithClipOverlay())
                 .setVideoMovFlags("+faststart");
         encoder().applyVideoFlags(o, new VideoEncoderStrategy.QualitySettings(
                 props.getPreviewCrf(), props.getPreviewPreset(), false));

@@ -37,6 +37,11 @@ public class FfmpegProperties {
     private final String watermarkBoxColor;
     private final int watermarkBoxBorder;
     private final int watermarkMargin;
+    // Bottom-center overlay baked into the 5 preview clips only (the
+    // shorter 5s preview + the full compressed video do NOT get this
+    // text — the request was specifically about the 5 mini clips).
+    private final String clipOverlayText;
+    private final int clipOverlayFontSize;
     // Preview clips (5×25s)
     private final int previewClipSeconds;
     private final double[] previewClipPositions;
@@ -66,6 +71,8 @@ public class FfmpegProperties {
             @Value("${app.ffmpeg.watermark.box-color:black@0.4}") String watermarkBoxColor,
             @Value("${app.ffmpeg.watermark.box-border:6}") int watermarkBoxBorder,
             @Value("${app.ffmpeg.watermark.margin:12}") int watermarkMargin,
+            @Value("${app.ffmpeg.clip-overlay.text:See more SpankyCouples.com}") String clipOverlayText,
+            @Value("${app.ffmpeg.clip-overlay.font-size:18}") int clipOverlayFontSize,
             @Value("${app.ffmpeg.preview-clip-seconds:25}") int previewClipSeconds,
             @Value("${app.ffmpeg.preview-clip-positions:0.05,0.35,0.50,0.65,0.95}") double[] previewClipPositions,
             @Value("${app.ffmpeg.gpu.enabled:true}") boolean gpuEnabled,
@@ -90,6 +97,8 @@ public class FfmpegProperties {
         this.watermarkBoxColor = watermarkBoxColor == null ? "black@0.4" : watermarkBoxColor;
         this.watermarkBoxBorder = watermarkBoxBorder;
         this.watermarkMargin = watermarkMargin;
+        this.clipOverlayText = clipOverlayText == null ? "" : clipOverlayText;
+        this.clipOverlayFontSize = clipOverlayFontSize;
         this.previewClipSeconds = previewClipSeconds;
         this.previewClipPositions = previewClipPositions == null || previewClipPositions.length == 0
                 ? new double[]{0.05, 0.35, 0.50, 0.65, 0.95}
@@ -118,6 +127,8 @@ public class FfmpegProperties {
     public String getWatermarkBoxColor() { return watermarkBoxColor; }
     public int getWatermarkBoxBorder() { return watermarkBoxBorder; }
     public int getWatermarkMargin() { return watermarkMargin; }
+    public String getClipOverlayText() { return clipOverlayText; }
+    public int getClipOverlayFontSize() { return clipOverlayFontSize; }
     public int getPreviewClipSeconds() { return previewClipSeconds; }
     public double[] getPreviewClipPositions() { return previewClipPositions; }
     public boolean isGpuEnabled() { return gpuEnabled; }

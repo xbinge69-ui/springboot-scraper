@@ -212,7 +212,7 @@
         <div class="clip-grid" id="clipGrid"></div>
 
         <div class="row" style="margin-top:1rem;">
-            <button id="deleteAllBtn" class="btn danger" type="button">🗑️ Delete all preview clips</button>
+            <button id="deleteAllBtn" class="btn danger" type="button">🗑️ Delete ALL preview clips (incl. previous jobs)</button>
         </div>
 
         <h3>Result JSON <span class="sub" style="font-weight:400;">(entry fields only, no stats)</span></h3>
@@ -552,11 +552,19 @@
         clipFilenames.forEach((filename, i) => {
             const card = document.createElement('div');
             card.className = 'clip-card';
+            // The play endpoint sets Content-Disposition: inline, which
+            // makes the browser ignore the `download` attribute and try
+            // to stream the file in-place — most browsers then say
+            // "resource not available" because the play endpoint is meant
+            // for the <video> tag, not for downloads. Hit the sibling
+            // /download endpoint which sends Content-Disposition: attachment
+            // so the file actually saves.
+            const downloadHref = clipUrlPrefix + encodeURIComponent(filename) + '/download';
             card.innerHTML = `
                 <h4>Clip ${i + 1} <span class="clip-pos">(${positions[i] || ''})</span></h4>
                 <video src="${clipUrlPrefix}${encodeURIComponent(filename)}" controls preload="none"></video>
                 <div class="clip-actions">
-                    <a class="btn success" href="${clipUrlPrefix}${encodeURIComponent(filename)}" download="${filename}">⬇ Download</a>
+                    <a class="btn success" href="${downloadHref}" download="${filename}">⬇ Download</a>
                     <button class="btn danger" data-clip="${filename}">🗑️</button>
                 </div>
             `;
@@ -603,26 +611,44 @@
     async function deleteClip(cardEl, filename) {
         if (!currentJobId) return;
         try {
-            // We don't expose per-clip DELETE — use delete-all (and the user
-            // can rerun the pipeline for a single new clip). For a future
-            // iteration: add a per-clip DELETE endpoint that removes a
-            // single file from the previews dir.
-            await fetch('/api/video/preview-clips/' + encodeURIComponent(currentJobId), { method: 'DELETE' });
-            cardEl.remove();
-            // After delete-all, the player is gone but the main CDN video still works.
+            // Per-clip DELETE: only this file goes away, the other 4
+            // sibling clips stay on disk so the user can still play
+            // and download them. The OLD implementation called the
+            // "delete all for this job" endpoint, which is what caused
+            // "site not available" on subsequent downloads — the cards
+            // for the other 4 clips remained in the UI but pointed at
+            // 404 URLs.
+            const res = await fetch('/api/video/preview-clips/'
+                + encodeURIComponent(currentJobId)
+                + '/' + encodeURIComponent(filename),
+                { method: 'DELETE' });
+            if (res.status === 204 || res.ok) {
+                cardEl.remove();
+            } else if (res.status === 404) {
+                // File already gone — drop the card so the UI matches
+                // reality, but no need to alarm the user.
+                cardEl.remove();
+            } else {
+                alert('Delete failed: HTTP ' + res.status);
+            }
         } catch (err) {
             alert('Delete failed: ' + err.message);
         }
     }
 
     async function deleteAllClips() {
-        if (!currentJobId) return;
-        if (!confirm('Delete all 5 preview clips for this job?')) return;
+        if (!confirm('Delete ALL preview clips on disk, including any leftovers from previous jobs you forgot to clean up?')) return;
         try {
-            const res = await fetch('/api/video/preview-clips/' + encodeURIComponent(currentJobId), { method: 'DELETE' });
-            if (res.status === 204 || res.ok) {
+            // Cross-job cleanup: scans java.io.tmpdir for every
+            // scraper-previews-* directory and wipes it, even if the
+            // job is no longer in the in-memory registry (the registry
+            // forgets jobs after a short TTL, but the temp files live
+            // forever). Returns {removedDirs, removedFiles, message}.
+            const res = await fetch('/api/video/preview-clips/all', { method: 'DELETE' });
+            if (res.ok) {
+                const body = await res.json();
                 clipGrid.innerHTML = '';
-                runSuccess.textContent = '🗑️ Preview clips deleted. Main CDN video is unaffected.';
+                runSuccess.textContent = '🗑️ ' + (body.message || 'All preview clips cleared.');
             } else {
                 alert('Delete failed: HTTP ' + res.status);
             }
