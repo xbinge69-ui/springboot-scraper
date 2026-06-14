@@ -46,6 +46,39 @@
             font-family: inherit;
         }
         textarea { min-height: 200px; resize: vertical; }
+        .url-inputs { display: flex; flex-direction: column; gap: .5rem; margin-top: .5rem; }
+        .url-row { display: flex; gap: .5rem; align-items: stretch; }
+        .url-row .url-input { flex: 1 1 0%; min-width: 0; }
+        .url-row .url-remove {
+            background: transparent;
+            color: var(--muted);
+            border: 1px solid #334155;
+            border-radius: 6px;
+            width: 40px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            line-height: 1;
+            flex-shrink: 0;
+            transition: color .15s, border-color .15s, background .15s;
+            padding: 0;
+        }
+        .url-row .url-remove:hover { color: var(--error); border-color: var(--error); background: rgba(239, 68, 68, .08); }
+        .url-row .url-remove:disabled { opacity: .3; cursor: not-allowed; }
+        .btn-add-url {
+            margin-top: .5rem;
+            background: transparent;
+            color: var(--accent);
+            border: 1px dashed #475569;
+            border-radius: 6px;
+            padding: .55rem 1rem;
+            cursor: pointer;
+            font-size: .9rem;
+            font-weight: 500;
+            width: 100%;
+            transition: border-color .15s, background .15s;
+        }
+        .btn-add-url:hover { border-color: var(--accent); background: rgba(245, 158, 11, .08); }
+        .url-count { font-size: .85rem; color: var(--muted); margin-top: .5rem; }
         .btn {
             margin-top: 1rem;
             background: var(--accent);
@@ -95,10 +128,15 @@
         <h2>URLs</h2>
         <p class="sub">One URL per line. Empty lines and duplicates are ignored.</p>
 
-        <label for="urls">Source page URLs (one per line) *</label>
-        <textarea id="urls" placeholder="https://www.erome.com/a/xxxx
-https://www.erome.com/a/yyyy
-https://www.erome.com/a/zzzz"></textarea>
+        <label>Source page URLs *</label>
+        <div class="url-inputs" id="urlInputs">
+            <div class="url-row">
+                <input type="url" class="url-input" placeholder="https://www.erome.com/a/xxxx" autocomplete="off" spellcheck="false" />
+                <button type="button" class="url-remove" title="Remove URL" aria-label="Remove">×</button>
+            </div>
+        </div>
+        <button type="button" id="addUrlBtn" class="btn-add-url">+ Add another URL</button>
+        <p class="url-count" id="urlCount"></p>
 
         <div style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
             <label style="display:flex; align-items:center; gap:.5rem; margin:0; font-weight:600; cursor:pointer;">
@@ -106,7 +144,7 @@ https://www.erome.com/a/zzzz"></textarea>
                 <span>🧠 Use <strong>Minimax</strong> hosted API for this batch (off by default — uses local Ollama <code>minimax-m3</code> otherwise)</span>
             </label>
             <label style="display:flex; align-items:center; gap:.5rem; margin:.5rem 0 0; font-weight:600; cursor:pointer;">
-                <input id="skipLlm" type="checkbox" style="width:auto;"/>
+                <input id="skipLlm" type="checkbox" checked style="width:auto;"/>
                 <span>⏭️ <strong>Skip LLM enrichment</strong> for every entry (no Ollama/Minimax call, 2-10s faster per URL)</span>
             </label>
             <p id="llmStatus" class="hint" style="margin:.4rem 0 0;">Checking LLM providers...</p>
@@ -148,7 +186,9 @@ https://www.erome.com/a/zzzz"></textarea>
 
 <script>
     const runBtn        = document.getElementById('runBtn');
-    const urlsField     = document.getElementById('urls');
+    const urlInputs     = document.getElementById('urlInputs');
+    const addUrlBtn     = document.getElementById('addUrlBtn');
+    const urlCount      = document.getElementById('urlCount');
     const errorEl       = document.getElementById('error');
     const successEl     = document.getElementById('success');
     const output        = document.getElementById('output');
@@ -224,17 +264,132 @@ https://www.erome.com/a/zzzz"></textarea>
         }
     })();
 
-    function parseUrls(raw) {
+    // ---- Dynamic URL list ----
+    function addUrlRow(value, focus) {
+        const row = document.createElement('div');
+        row.className = 'url-row';
+        row.innerHTML =
+            '<input type="url" class="url-input" placeholder="https://www.erome.com/a/xxxx" autocomplete="off" spellcheck="false" />' +
+            '<button type="button" class="url-remove" title="Remove URL" aria-label="Remove">×</button>';
+        if (value) row.querySelector('.url-input').value = value;
+        urlInputs.appendChild(row);
+        syncRemoveButtons();
+        if (focus) row.querySelector('.url-input').focus();
+        return row;
+    }
+
+    function removeUrlRow(row) {
+        if (urlInputs.children.length <= 1) {
+            // Always keep at least one row — clear it instead of removing.
+            const inp = row.querySelector('.url-input');
+            if (inp) { inp.value = ''; inp.focus(); }
+            updateUrlCount();
+            return;
+        }
+        const prev = row.previousElementSibling;
+        row.remove();
+        syncRemoveButtons();
+        if (prev) {
+            const inp = prev.querySelector('.url-input');
+            if (inp) inp.focus();
+        }
+        updateUrlCount();
+    }
+
+    function collectUrls() {
         const seen = new Set();
         const out = [];
-        for (const line of raw.split(/\r?\n/)) {
-            const t = line.trim();
+        for (const inp of urlInputs.querySelectorAll('.url-input')) {
+            const t = inp.value.trim();
             if (!t || seen.has(t)) continue;
             seen.add(t);
             out.push(t);
         }
         return out;
     }
+
+    function updateUrlCount() {
+        const n = collectUrls().length;
+        urlCount.textContent = n === 0
+            ? 'No URLs yet — type or paste a link below.'
+            : (n === 1 ? '1 URL ready.' : n + ' URLs ready.');
+    }
+
+    function syncRemoveButtons() {
+        const single = urlInputs.children.length <= 1;
+        for (const btn of urlInputs.querySelectorAll('.url-remove')) {
+            btn.disabled = single;
+            btn.title = single ? 'Clear the URL instead' : 'Remove URL';
+        }
+    }
+
+    // Auto-add a new empty row when the user types into the current row
+    // (and the row is the last one). Mirrors the "linear input" UX.
+    urlInputs.addEventListener('input', (e) => {
+        if (!e.target.classList.contains('url-input')) return;
+        const row = e.target.closest('.url-row');
+        const last = urlInputs.lastElementChild;
+        if (row === last && e.target.value.trim() !== '') {
+            addUrlRow();
+        }
+        updateUrlCount();
+    });
+
+    // Enter → focus next row (or create+focus a fresh one).
+    // Backspace on an empty row → remove it and focus the previous one.
+    urlInputs.addEventListener('keydown', (e) => {
+        if (!e.target.classList.contains('url-input')) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const row = e.target.closest('.url-row');
+            const next = row.nextElementSibling;
+            if (next) {
+                next.querySelector('.url-input').focus();
+            } else {
+                addUrlRow('', true);
+            }
+        } else if (e.key === 'Backspace' && e.target.value === '' && urlInputs.children.length > 1) {
+            e.preventDefault();
+            removeUrlRow(e.target.closest('.url-row'));
+        }
+    });
+
+    // Multi-line paste → split into separate rows.
+    urlInputs.addEventListener('paste', (e) => {
+        if (!e.target.classList.contains('url-input')) return;
+        const data = e.clipboardData || window.clipboardData;
+        if (!data) return;
+        const text = data.getData('text');
+        if (!text || !/[\r\n]/.test(text)) return; // single line — let default paste happen
+        e.preventDefault();
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (!lines.length) return;
+        // Replace the current row's value with the first line, then append the rest.
+        e.target.value = lines[0];
+        for (let i = 1; i < lines.length; i++) {
+            addUrlRow(lines[i]);
+        }
+        // Always end with an empty row so the user can keep typing.
+        if (urlInputs.lastElementChild.querySelector('.url-input').value !== '') {
+            addUrlRow();
+        }
+        // Focus the new trailing empty row.
+        urlInputs.lastElementChild.querySelector('.url-input').focus();
+        updateUrlCount();
+    });
+
+    urlInputs.addEventListener('click', (e) => {
+        const btn = e.target.closest('.url-remove');
+        if (!btn || btn.disabled) return;
+        removeUrlRow(btn.closest('.url-row'));
+    });
+
+    if (addUrlBtn) {
+        addUrlBtn.addEventListener('click', () => addUrlRow('', true));
+    }
+
+    syncRemoveButtons();
+    updateUrlCount();
 
     // ---- ffmpeg / GPU probe ----
     async function refreshFfmpegStatus() {
@@ -311,7 +466,7 @@ https://www.erome.com/a/zzzz"></textarea>
         successEl.style.display = 'none';
         output.textContent = 'Submitting batch…';
 
-        const urls = parseUrls(urlsField.value);
+        const urls = collectUrls();
         if (!urls.length) {
             errorEl.textContent = 'Please enter at least one URL.';
             errorEl.style.display = 'block';
