@@ -3,9 +3,13 @@ package com.example.scraper.controller;
 import com.example.scraper.model.PageInfo;
 import com.example.scraper.model.PipelineOutcome;
 import com.example.scraper.model.PipelineRequest;
+import com.example.scraper.model.PropagationJob;
 import com.example.scraper.model.ScrapedItem;
+import com.example.scraper.model.VideoCatalogEntry;
 import com.example.scraper.model.VideoResult;
+import com.example.scraper.service.AddVideoEntryPropagationService;
 import com.example.scraper.service.PageInfoService;
+import com.example.scraper.service.ProcessedUrlHistory;
 import com.example.scraper.service.PipelineJobService;
 import com.example.scraper.service.ScraperService;
 import com.example.scraper.service.OllamaService;
@@ -38,6 +42,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Controller
 public class ScraperController {
@@ -52,6 +57,14 @@ public class ScraperController {
     private final PipelineJobService pipelineJobService;
     private final GpuEncoderProbe gpuEncoderProbe;
     private final com.example.scraper.video.FfmpegProperties ffmpegProperties;
+    private final ProcessedUrlHistory processedHistory;
+    /**
+     * Optional — present only if the auto-propagation feature is
+     * enabled in {@code application.properties}. When null, the batch
+     * endpoint returns the original (un-wrapped) JSON array and the
+     * UI works as before.
+     */
+    private final AddVideoEntryPropagationService addVideoEntryPropagationService;
 
     public ScraperController(ScraperService scraperService,
                              VideoScraperService videoScraperService,
@@ -62,7 +75,9 @@ public class ScraperController {
                              com.example.scraper.service.llm.MinimaxChatProvider minimax,
                              PipelineJobService pipelineJobService,
                              GpuEncoderProbe gpuEncoderProbe,
-                             com.example.scraper.video.FfmpegProperties ffmpegProperties) {
+                             com.example.scraper.video.FfmpegProperties ffmpegProperties,
+                             ProcessedUrlHistory processedHistory,
+                             org.springframework.beans.factory.ObjectProvider<AddVideoEntryPropagationService> addVideoEntryPropagationServiceProvider) {
         this.scraperService = scraperService;
         this.videoScraperService = videoScraperService;
         this.videoIngestionPipelineService = videoIngestionPipelineService;
@@ -73,6 +88,12 @@ public class ScraperController {
         this.pipelineJobService = pipelineJobService;
         this.gpuEncoderProbe = gpuEncoderProbe;
         this.ffmpegProperties = ffmpegProperties;
+        this.processedHistory = processedHistory;
+        // ObjectProvider so the service is optional — no startup error
+        // when app.add-video-entry.enabled=false (the bean is still
+        // created by Spring, but isEnabled() returns false; the
+        // service is harmless to inject).
+        this.addVideoEntryPropagationService = addVideoEntryPropagationServiceProvider.getIfAvailable();
     }
 
     @GetMapping("/")
@@ -451,22 +472,52 @@ public class ScraperController {
      *
      * <p>The optional top-level {@code useMinimax} flag (or per-URL
      * override) routes the LLM call to MiniMax for that entry.
+     *
+     * <h3>Auto-propagation to project-b</h3>
+     * When {@code app.add-video-entry.enabled=true} in
+     * {@code application.properties} AND at least one URL produces a
+     * successful entry, the response shape changes:
+     * <pre>
+     * {
+     *   "results":     [ { "sourcePageUrl":..., "entry":..., "warnings":..., "stats":... }, ... ],
+     *   "propagation": { "jobId": "...", "statusUrl": "/api/propagation/status/...",
+     *                    "totalChunks": 3, "appendedEntries": 0 }
+     * }
+     * </pre>
+     * The frontend polls the {@code statusUrl} to render the
+     * propagation progress. When the feature is disabled (the default),
+     * the response is the same {@code List<Map<String,Object>>} as
+     * before — fully backward compatible.
      */
     @PostMapping("/api/video/pipeline/batch")
     @ResponseBody
-    public List<Map<String, Object>> ingestBatch(@RequestBody BatchPipelineRequest body) {
+    public Object ingestBatch(@RequestBody BatchPipelineRequest body) {
         if (body == null || body.urls() == null || body.urls().isEmpty()) {
             throw new IllegalArgumentException("urls is required (non-empty list)");
         }
         boolean useMinimax = Boolean.TRUE.equals(body.useMinimax());
         boolean skipLlm = Boolean.TRUE.equals(body.skipLlm());
         List<Map<String, Object>> results = new ArrayList<>();
+        List<String> toAddToHistory = new ArrayList<>();
+        // Successful VideoCatalogEntry objects, in the same order as
+        // `results` — handed to the propagation service if enabled.
+        List<VideoCatalogEntry> successful = new ArrayList<>();
         for (String url : body.urls()) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("sourcePageUrl", url);
             if (url == null || url.isBlank()
                     || (!url.startsWith("http://") && !url.startsWith("https://"))) {
                 row.put("error", "Invalid URL");
+                results.add(row);
+                continue;
+            }
+            // Skip URLs that have already been processed. The history is
+            // an O(1) HashSet lookup; the user doesn't pay the cost of
+            // re-grabbing / re-pipelining a video that's already in the
+            // catalog.
+            if (processedHistory.contains(url)) {
+                row.put("skipped", true);
+                row.put("skipReason", "already in processed history");
                 results.add(row);
                 continue;
             }
@@ -496,12 +547,87 @@ public class ScraperController {
                 row.put("entry", outcome.getEntry());
                 row.put("warnings", outcome.getWarnings());
                 row.put("stats", outcome.getStats());
+                // Only record URLs that produced a real catalog entry —
+                // failed ones stay out of the history so the user can
+                // retry them.
+                if (outcome.getEntry() != null) {
+                    toAddToHistory.add(url);
+                    successful.add(outcome.getEntry());
+                }
             } catch (Exception e) {
                 row.put("error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             }
             results.add(row);
         }
+        if (!toAddToHistory.isEmpty()) {
+            processedHistory.addAll(toAddToHistory);
+        }
+
+        // Auto-propagation to project-b. Opt-in via config; preserves
+        // the original response shape when disabled.
+        if (addVideoEntryPropagationService != null
+                && addVideoEntryPropagationService.isEnabled()
+                && !successful.isEmpty()) {
+            String batchId = "batch-" + System.currentTimeMillis();
+            String jobId = addVideoEntryPropagationService.propagate(successful, batchId);
+            if (jobId != null) {
+                Map<String, Object> wrapped = new LinkedHashMap<>();
+                wrapped.put("results", results);
+                Map<String, Object> propagation = new LinkedHashMap<>();
+                propagation.put("jobId", jobId);
+                propagation.put("statusUrl", "/api/propagation/status/" + jobId);
+                propagation.put("batchId", batchId);
+                propagation.put("totalChunks", (int) Math.ceil(successful.size()
+                        / 20.0));  // chunk-size is duplicated here; OK for a UI hint
+                propagation.put("appendedEntries", 0);
+                wrapped.put("propagation", propagation);
+                return wrapped;
+            }
+            // jobId == null means propagate() decided not to start a
+            // job (e.g. system prompt failed to load) — fall through
+            // and return the original list so the caller still gets
+            // their batch results.
+        }
         return results;
+    }
+
+    /**
+     * Returns the size of the processed-URL history. The frontend uses
+     * this to show "X URLs already processed" and to skip them in
+     * subsequent batches.
+     */
+    @GetMapping("/api/batch/history")
+    @ResponseBody
+    public Map<String, Object> getHistory() {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("size", processedHistory.size());
+        return resp;
+    }
+
+    /**
+     * Polled by the batch UI when auto-propagation to project-b is
+     * enabled. Returns the live status of a {@link PropagationJob}
+     * (status / progress / step / appendedEntries / errors). When
+     * {@code status == DONE} the response includes the list of
+     * appended ids.
+     *
+     * <p>When propagation is disabled or the jobId is unknown, returns
+     * a 404 with a JSON error body — same shape as
+     * {@link #jobStatus}.
+     */
+    @GetMapping("/api/propagation/status/{jobId}")
+    @ResponseBody
+    public ResponseEntity<Map<String, Object>> propagationStatus(@PathVariable("jobId") String jobId) {
+        if (addVideoEntryPropagationService == null) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("error", "Propagation is not enabled on this server"));
+        }
+        Optional<PropagationJob> opt = addVideoEntryPropagationService.get(jobId);
+        if (opt.isEmpty()) {
+            return ResponseEntity.status(404)
+                    .body(Map.of("error", "Unknown propagation jobId: " + jobId));
+        }
+        return ResponseEntity.ok(addVideoEntryPropagationService.toStatusPayload(opt.get()));
     }
 
     /** Request body for {@code POST /api/video/pipeline/batch}. */

@@ -79,6 +79,42 @@
         }
         .btn-add-url:hover { border-color: var(--accent); background: rgba(245, 158, 11, .08); }
         .url-count { font-size: .85rem; color: var(--muted); margin-top: .5rem; }
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, .35);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+            vertical-align: -2px;
+            margin-right: .4rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .result-chunk { margin-top: 1rem; }
+        .result-chunk-header {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 1rem; margin-bottom: .4rem;
+        }
+        .result-chunk-header .meta { color: var(--muted); font-size: .85rem; }
+        .result-chunk pre { margin: 0; max-height: 360px; }
+        .copy-chunk-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: .35rem .7rem;
+            cursor: pointer;
+            font-size: .8rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .copy-chunk-btn:hover { background: var(--accent-hover); }
+        .copy-chunk-btn:disabled { opacity: .5; cursor: not-allowed; }
+        .history-info {
+            font-size: .85rem; color: var(--muted); margin-top: .5rem;
+        }
+        .history-info strong { color: var(--text); }
         .btn {
             margin-top: 1rem;
             background: var(--accent);
@@ -126,7 +162,24 @@
 
     <div class="section">
         <h2>URLs</h2>
-        <p class="sub">One URL per line. Empty lines and duplicates are ignored.</p>
+        <p class="sub">Type or paste one URL per input — a new row appears under the current one as soon as you start typing. Empty rows and duplicates are ignored.</p>
+
+        <div style="margin-bottom:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
+            <label for="discoveryUrl" style="margin-top:0; display:flex; align-items:center; gap:.4rem;">
+                🔎 <span>Import links from a <strong>ixxx.com</strong> search</span>
+            </label>
+            <div style="display:flex; gap:.5rem; margin-top:.4rem;">
+                <input type="url" id="discoveryUrl" style="flex:1;"
+                       placeholder="https://www.ixxx.com/c/&lt;category&gt;?filter[advertiser_site]=&lt;source&gt;&amp;filter[order_by]=popular" />
+                <button type="button" id="discoverBtn" class="btn" style="margin-top:0; white-space:nowrap;">🔍 Fetch</button>
+            </div>
+            <div style="display:flex; gap:.5rem; margin-top:.4rem; align-items:center;">
+                <label for="discoverySource" style="margin:0; font-weight:500; font-size:.85rem; color:var(--muted);">Source site:</label>
+                <input type="text" id="discoverySource" style="flex:1; padding:.4rem .6rem; font-size:.85rem;"
+                       placeholder="auto-detect (e.g. xhamster.com, pornhub.com, xvideos.com)" />
+            </div>
+            <p class="hint" id="discoveryStatus" style="margin:.5rem 0 0;">Paste an ixxx.com search URL (any category, any source) and click <strong>Fetch</strong>. The dominant source site on that page is auto-detected; override it above if needed. The list below will be replaced with one row per video page found.</p>
+        </div>
 
         <label>Source page URLs *</label>
         <div class="url-inputs" id="urlInputs">
@@ -175,12 +228,18 @@
 
     <div class="section">
         <h2>Result</h2>
-        <p class="sub">Final list of catalog JSONs, separated by commas. Failed entries appear as <code>{"sourcePageUrl":"...","error":"..."}</code>.</p>
-        <div class="row" style="margin-top:.5rem;">
-            <button id="copyBtn" type="button" style="margin-top:0;">📋 Copy list</button>
-            <span id="copyStatus" class="hint" style="margin:0;"></span>
+        <p class="sub">Final list of catalog JSONs, separated by commas. The result is split into chunks of <strong>20 entries</strong> so each <strong>📋 Copy this chunk</strong> button stays well under the 50 KB clipboard cap. Failed entries appear as <code>{"sourcePageUrl":"...","error":"..."}</code>; entries already in your history appear as <code>{"sourcePageUrl":"...","skipped":true}</code> and are NOT re-processed.</p>
+        <p class="history-info" id="historyInfo">Loading processed-URL history…</p>
+        <div id="outputChunks"><p class="hint" style="margin:0;">No result yet.</p></div>
+        <div id="propagationSection" style="display:none; margin-top: 1.2rem; padding: 1rem; border: 1px solid #334155; border-radius: 8px; background: #0b1220;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                <strong>📤 Auto-propagating to <code>project-b/src/data/videos.json</code></strong>
+                <span id="propagationStatus" class="hint">queued…</span>
+            </div>
+            <div class="progress-bar" style="margin-top: .6rem;"><div id="propagationFill" class="progress-fill"></div></div>
+            <p id="propagationStep" class="hint" style="margin: .4rem 0 0;">Initializing…</p>
+            <p id="propagationIds" class="hint" style="margin: .2rem 0 0; font-family: monospace;"></p>
         </div>
-        <pre id="output">No result yet.</pre>
     </div>
 </div>
 
@@ -189,9 +248,14 @@
     const urlInputs     = document.getElementById('urlInputs');
     const addUrlBtn     = document.getElementById('addUrlBtn');
     const urlCount      = document.getElementById('urlCount');
+    const discoveryUrl  = document.getElementById('discoveryUrl');
+    const discoverBtn   = document.getElementById('discoverBtn');
+    const discoverySource = document.getElementById('discoverySource');
+    const discoveryStatus = document.getElementById('discoveryStatus');
     const errorEl       = document.getElementById('error');
     const successEl     = document.getElementById('success');
-    const output        = document.getElementById('output');
+    const outputChunks  = document.getElementById('outputChunks');
+    const historyInfo   = document.getElementById('historyInfo');
     const progressWrap  = document.getElementById('progressWrap');
     const progressFill  = document.getElementById('progressFill');
     const progressText  = document.getElementById('progressText');
@@ -201,10 +265,60 @@
     const ffmpegDetails = document.getElementById('ffmpegDetails');
     const ffmpegRefresh = document.getElementById('ffmpegRefreshBtn');
     const llmStatus     = document.getElementById('llmStatus');
-    const copyBtn       = document.getElementById('copyBtn');
-    const copyStatus    = document.getElementById('copyStatus');
 
-    let pollTimer = null;
+    // ---- Busy / loading state ----
+    // Disables every interactive element in the URLs section and shows
+    // a spinner so the user can't fire two requests in parallel.
+    // (useMinimax is intentionally left alone here — the LLM probe
+    // above already locked it down if MiniMax isn't configured. The
+    // runBtn is the only thing that needs to be un-fireable, and
+    // setBusy covers that.)
+    function setBusy(busy, message) {
+        if (discoverBtn) discoverBtn.disabled = busy;
+        if (addUrlBtn)   addUrlBtn.disabled = busy;
+        if (runBtn)      runBtn.disabled = busy;
+        for (const inp of urlInputs.querySelectorAll('.url-input'))  inp.disabled = busy;
+        for (const btn of urlInputs.querySelectorAll('.url-remove')) {
+            btn.disabled = busy || urlInputs.children.length <= 1;
+        }
+        if (discoveryUrl)     discoveryUrl.disabled = busy;
+        if (discoverySource)  discoverySource.disabled = busy;
+        if (skipLlm)          skipLlm.disabled = busy;
+        if (busy && message) {
+            discoveryStatus.innerHTML = '<span class="spinner"></span>' + message;
+        }
+    }
+
+    async function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+        // Fallback for non-secure contexts (http://localhost on some
+        // browsers): hidden textarea + execCommand.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } finally { document.body.removeChild(ta); }
+    }
+
+    // ---- Processed-URL history (server-side O(1) dedup) ----
+    async function refreshHistoryInfo() {
+        try {
+            const r = await fetch('/api/batch/history');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            const n = d.size || 0;
+            historyInfo.innerHTML = n === 0
+                ? '📚 Processed-URL history is empty — every URL in your list will be processed.'
+                : '📚 <strong>' + n + '</strong> URL' + (n === 1 ? '' : 's') + ' already in your processed history. They will be skipped on Run Batch.';
+        } catch (err) {
+            historyInfo.innerHTML = '⚠️ could not load history: ' + err.message;
+        }
+    }
 
     (async () => {
         try {
@@ -391,6 +505,99 @@
     syncRemoveButtons();
     updateUrlCount();
 
+    // ---- ixxx.com discovery → import external video links ----
+    if (discoverBtn && discoveryUrl) {
+        discoverBtn.addEventListener('click', async () => {
+            const url = discoveryUrl.value.trim();
+            if (!url) {
+                discoveryStatus.textContent = '⚠️ paste an ixxx.com search URL first.';
+                return;
+            }
+            const sourceOverride = (discoverySource && discoverySource.value || '').trim();
+            setBusy(true, 'Fetching page…');
+            const resolveHint = setTimeout(() => {
+                if (discoverBtn.disabled) {
+                    discoveryStatus.innerHTML = '<span class="spinner"></span>Resolving redirect links (5-15s)…';
+                }
+            }, 1500);
+            try {
+                const payload = { url, videosOnly: true };
+                if (sourceOverride) payload.sourceHost = sourceOverride;
+                const r = await fetch('/api/discovery/ixxx', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    throw new Error(data.error || ('HTTP ' + r.status));
+                }
+                const urls = Array.isArray(data.urls) ? data.urls : [];
+                if (!urls.length) {
+                    const found = data.redirectsFound || 0;
+                    const resolved = data.redirectsResolved || 0;
+                    const src = data.detectedSource || data.requestedSource || 'that page';
+                    const more = found > 0
+                        ? '  (found ' + found + ' redirect link'
+                            + (found === 1 ? '' : 's') + ', resolved ' + resolved + ').'
+                        : '  (no /out/ redirect links on the page — the page may be JS-rendered).';
+                    discoveryStatus.textContent = '⚠️ no video-page links found'
+                        + (sourceOverride ? ' for ' + sourceOverride : '')
+                        + ' on ' + src + '.' + more;
+                    return;
+                }
+                // Replace the current list — clear, then add one row per URL,
+                // and leave a trailing empty row for further typing.
+                while (urlInputs.firstChild) urlInputs.removeChild(urlInputs.firstChild);
+                for (const u of urls) {
+                    addUrlRow(u);
+                }
+                addUrlRow();
+                updateUrlCount();
+
+                // Build a status line that tells the user what was imported.
+                const detected = data.detectedSource || 'unknown';
+                const srcSummary = sourceOverride
+                    ? ' from ' + detected + ' (pinned to ' + sourceOverride + ')'
+                    : ' from ' + detected + ' (auto-detected)';
+                let extra = '';
+                const found = data.redirectsFound || 0;
+                const resolved = data.redirectsResolved || 0;
+                if (found > 0) {
+                    extra += '  Resolved ' + resolved + '/' + found + ' redirect'
+                        + (found === 1 ? '' : 's') + '.';
+                }
+                const allSources = Array.isArray(data.sources) ? data.sources : [];
+                if (allSources.length > 1) {
+                    const ranked = allSources
+                        .map(s => s.host + ' (' + s.count + ')')
+                        .join(', ');
+                    extra += '  Other sources on page: ' + ranked + '.';
+                }
+                discoveryStatus.textContent =
+                    '✅ imported ' + urls.length + ' video link'
+                    + (urls.length === 1 ? '' : 's') + srcSummary + '.'
+                    + extra;
+            } catch (err) {
+                discoveryStatus.textContent = '❌ ' + (err.message || err);
+            } finally {
+                clearTimeout(resolveHint);
+                setBusy(false);
+            }
+        });
+
+        // Submit on Enter from either discovery input.
+        const triggerFetch = () => discoverBtn.click();
+        discoveryUrl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); triggerFetch(); }
+        });
+        if (discoverySource) {
+            discoverySource.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); triggerFetch(); }
+            });
+        }
+    }
+
     // ---- ffmpeg / GPU probe ----
     async function refreshFfmpegStatus() {
         ffmpegSummary.textContent = 'Probing ffmpeg GPU encoders…';
@@ -430,66 +637,119 @@
     if (ffmpegRefresh) ffmpegRefresh.addEventListener('click', refreshFfmpegStatus);
     refreshFfmpegStatus();
 
-    // ---- Copy result list to clipboard ----
-    if (copyBtn) {
-        copyBtn.addEventListener('click', async () => {
-            const text = output.textContent || '';
-            if (!text || text === 'No result yet.' || text === 'Failed.') {
-                copyStatus.textContent = '⚠️ nothing to copy yet';
-                return;
-            }
-            try {
-                if (navigator.clipboard && window.isSecureContext) {
-                    await navigator.clipboard.writeText(text);
-                } else {
-                    // Fallback for non-secure contexts (e.g. http://localhost
-                    // on some browsers): use a hidden textarea + execCommand.
-                    const ta = document.createElement('textarea');
-                    ta.value = text;
-                    ta.style.position = 'fixed';
-                    ta.style.opacity = '0';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(ta);
+    // ---- Render the batch result as chunks of 20 ----
+    // Each chunk has its own "📋 Copy this chunk" button so individual
+    // chunks stay well under the 50 KB clipboard cap.
+    const CHUNK_SIZE = 20;
+    function renderChunks(arr) {
+        outputChunks.innerHTML = '';
+        if (!arr || !arr.length) {
+            outputChunks.innerHTML = '<p class="hint" style="margin:0;">No result yet.</p>';
+            return;
+        }
+        const okCount    = arr.filter(r => r.entry).length;
+        const errCount   = arr.filter(r => r.error).length;
+        const skipCount  = arr.filter(r => r.skipped).length;
+        const totalChunks = Math.ceil(arr.length / CHUNK_SIZE);
+
+        const summary = document.createElement('p');
+        summary.className = 'hint';
+        summary.style.margin = '0 0 .4rem';
+        summary.innerHTML =
+            'Processed <strong>' + arr.length + '</strong> URL(s): '
+            + '<span style="color:var(--success);">' + okCount + ' succeeded</span>, '
+            + '<span style="color:#fecaca;">' + errCount + ' failed</span>, '
+            + '<span style="color:#fbbf24;">' + skipCount + ' skipped (already in history)</span>.'
+            + '  Split into <strong>' + totalChunks + '</strong> chunk'
+            + (totalChunks === 1 ? '' : 's') + ' of ' + CHUNK_SIZE + '.';
+        outputChunks.appendChild(summary);
+
+        for (let i = 0; i < arr.length; i += CHUNK_SIZE) {
+            const slice  = arr.slice(i, Math.min(i + CHUNK_SIZE, arr.length));
+            const csv    = slice
+                .map(r => r.entry ? JSON.stringify(r.entry) : JSON.stringify(r))
+                .join(',');
+            const num    = Math.floor(i / CHUNK_SIZE) + 1;
+            const kb     = (csv.length / 1024).toFixed(1);
+            const tooBig = csv.length > 50_000;
+
+            const wrap = document.createElement('div');
+            wrap.className = 'result-chunk';
+
+            const header = document.createElement('div');
+            header.className = 'result-chunk-header';
+
+            const left = document.createElement('div');
+            left.innerHTML = '<strong>Chunk ' + num + '/' + totalChunks + '</strong>'
+                + ' <span class="meta">(' + slice.length + ' entries, ' + kb + ' KB'
+                + (tooBig ? ' — over 50 KB ⚠️' : '') + ')</span>';
+            header.appendChild(left);
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'copy-chunk-btn';
+            btn.textContent = '📋 Copy this chunk';
+            btn.addEventListener('click', async () => {
+                try {
+                    btn.disabled = true;
+                    await copyToClipboard(csv);
+                    const orig = btn.textContent;
+                    btn.textContent = '✅ Copied!';
+                    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+                } catch (err) {
+                    btn.textContent = '❌ copy failed';
+                    setTimeout(() => { btn.textContent = '📋 Copy this chunk'; btn.disabled = false; }, 2000);
                 }
-                copyStatus.textContent = '✅ copied to clipboard';
-                setTimeout(() => { copyStatus.textContent = ''; }, 2500);
-            } catch (err) {
-                copyStatus.textContent = '❌ copy failed: ' + (err.message || err);
-            }
-        });
+            });
+            header.appendChild(btn);
+
+            const pre = document.createElement('pre');
+            pre.textContent = csv;
+
+            wrap.appendChild(header);
+            wrap.appendChild(pre);
+            outputChunks.appendChild(wrap);
+        }
     }
 
-    runBtn.addEventListener('click', async () => {
-        errorEl.style.display = 'none';
-        successEl.style.display = 'none';
-        output.textContent = 'Submitting batch…';
+    // Initial placeholder
+    renderChunks([]);
 
+    // ---- Run Batch ----
+    runBtn.addEventListener('click', async () => {
         const urls = collectUrls();
         if (!urls.length) {
             errorEl.textContent = 'Please enter at least one URL.';
             errorEl.style.display = 'block';
-            output.textContent = 'No result yet.';
             return;
         }
+        errorEl.style.display = 'none';
+        successEl.style.display = 'none';
+        outputChunks.innerHTML = '<p class="hint" style="margin:0;">Submitting batch…</p>';
 
-        runBtn.disabled = true;
+        setBusy(true, 'Submitting batch of ' + urls.length + ' URL(s)…');
         progressWrap.style.display = 'block';
         progressFill.style.width = '5%';
         progressText.textContent = 'Submitting batch of ' + urls.length + ' URL(s)…';
+        // The discoveryStatus spinner is showing — also update the
+        // discovery panel's text so the user sees progress without
+        // having to scroll up to the result section.
+        const statusSpin = setTimeout(() => {
+            if (runBtn.disabled) {
+                discoveryStatus.innerHTML = '<span class="spinner"></span>Processing '
+                    + urls.length + ' URL(s) — could take a few minutes…';
+            }
+        }, 1500);
 
         try {
-            // The batch endpoint runs synchronously inside the request today
-            // (one URL after another). We wrap it in a small "submit-and-poll"
-            // UX: a single async POST that returns the final list when done.
-            // To give the user a live progress bar without a per-URL job-id
-            // we animate the bar while the batch is in flight.
+            // The batch endpoint runs synchronously inside the request
+            // (one URL after another). To give a live progress bar
+            // without a per-URL job-id we animate the bar while the
+            // batch is in flight.
             const tick = setInterval(() => {
                 const w = parseFloat(progressFill.style.width) || 5;
                 if (w < 92) progressFill.style.width = (w + 1.5) + '%';
             }, 800);
-            progressText.textContent = 'Processing ' + urls.length + ' URL(s)…';
 
             const res = await fetch('/api/video/pipeline/batch', {
                 method: 'POST',
@@ -501,30 +761,135 @@
                 const txt = await res.text();
                 throw new Error(txt || ('HTTP ' + res.status));
             }
-            const arr = await res.json();
+            // Response shape is { results: [...], propagation?: {...} }
+            // when auto-propagation is enabled, OR a bare array [...]
+            // when the feature is off. Normalize both.
+            const payload = await res.json();
+            const arr = Array.isArray(payload) ? payload
+                       : Array.isArray(payload.results) ? payload.results
+                       : [];
+            const propagation = !Array.isArray(payload) && payload.propagation
+                                ? payload.propagation : null;
+            clearTimeout(statusSpin);
             progressFill.style.width = '100%';
 
-            const okCount = arr.filter(r => r.entry).length;
-            const errCount = arr.length - okCount;
-            progressText.textContent = 'Done. ' + okCount + ' success / ' + errCount + ' failed (of ' + arr.length + ').';
+            const okCount  = arr.filter(r => r.entry).length;
+            const errCount = arr.filter(r => r.error).length;
+            const skipCount = arr.filter(r => r.skipped).length;
+            progressText.textContent = 'Done. ' + okCount + ' ok / '
+                    + errCount + ' failed / ' + skipCount + ' skipped (of ' + arr.length + ').';
 
-            // User asked for a clean comma-separated list of the entries
-            // (no `entry` wrapper, no `stats` block) — exactly the JSON
-            // shape that gets appended to videos.json. Failed rows fall
-            // back to `{"sourcePageUrl":"...","error":"..."}`.
-            const csv = arr.map(r => r.entry ? JSON.stringify(r.entry) : JSON.stringify(r)).join(',');
-            output.textContent = csv;
-            successEl.textContent = '✅ Batch complete — ' + okCount + '/' + arr.length + ' succeeded.';
+            renderChunks(arr);
+
+            // Kick off auto-propagation polling if the server told us
+            // there's a job. The poll runs independently of the rest
+            // of the page state — the user can keep working.
+            if (propagation && propagation.statusUrl) {
+                startPropagationPolling(propagation);
+            }
+            successEl.textContent = '✅ Batch complete — '
+                + okCount + '/' + arr.length + ' succeeded'
+                + (skipCount ? ' (' + skipCount + ' skipped, already in history)' : '')
+                + '.';
             successEl.style.display = 'block';
+
+            // Refresh the history counter — the new successful URLs
+            // are now in the history, so the counter will go up.
+            refreshHistoryInfo();
         } catch (err) {
+            clearTimeout(statusSpin);
             errorEl.textContent = err.message || String(err);
             errorEl.style.display = 'block';
-            output.textContent = 'Failed.';
+            outputChunks.innerHTML = '<p class="hint" style="margin:0;">Failed.</p>';
             progressText.textContent = 'Failed.';
         } finally {
-            runBtn.disabled = false;
+            setBusy(false);
         }
     });
+
+    // ---- Auto-propagation to project-b ----
+    // Polls /api/propagation/status/{jobId} every 1.5s until the job
+    // reaches a terminal state (DONE / PARTIAL / FAILED). Renders the
+    // progress bar + step line + appended ids.
+    const propagationSection = document.getElementById('propagationSection');
+    const propagationStatus  = document.getElementById('propagationStatus');
+    const propagationFill    = document.getElementById('propagationFill');
+    const propagationStep    = document.getElementById('propagationStep');
+    const propagationIds     = document.getElementById('propagationIds');
+    let propagationTimer = null;
+
+    function startPropagationPolling(initial) {
+        if (!propagationSection) return;
+        propagationSection.style.display = 'block';
+        propagationStatus.textContent = 'queued…';
+        propagationFill.style.width = '0%';
+        propagationStep.textContent = 'Initializing…';
+        propagationIds.textContent = '';
+        const totalChunks = initial.totalChunks || 0;
+        if (totalChunks > 0) {
+            propagationStep.textContent = '0/' + totalChunks + ' chunks done';
+        }
+        const poll = async () => {
+            try {
+                const r = await fetch(initial.statusUrl);
+                if (!r.ok) {
+                    propagationStatus.textContent = '⚠️ HTTP ' + r.status;
+                    return;  // keep polling
+                }
+                const d = await r.json();
+                const done   = d.completedChunks || 0;
+                const failed = d.failedChunks || 0;
+                const total  = d.totalChunks || totalChunks || 1;
+                const app    = d.appendedEntries || 0;
+                const step   = d.currentStep || '';
+                const status = d.status || 'PENDING';
+                const pct    = total > 0 ? Math.round((done + failed) * 100 / total) : 0;
+                propagationFill.style.width = pct + '%';
+                propagationStatus.textContent = status + '  ' + done + '/' + total
+                        + (failed > 0 ? ' (' + failed + ' failed)' : '');
+                propagationStep.textContent = step;
+                const ids = Array.isArray(d.appendedIds) ? d.appendedIds : [];
+                propagationIds.textContent = ids.length
+                        ? 'appended: ' + ids.join(', ')
+                        : '';
+
+                if (status === 'DONE') {
+                    propagationFill.style.width = '100%';
+                    propagationStatus.textContent = '✅ DONE — ' + app + ' entries appended';
+                    propagationSection.style.borderColor = 'var(--success)';
+                    stopPropagationPolling();
+                } else if (status === 'PARTIAL') {
+                    propagationStatus.textContent = '⚠️ PARTIAL — ' + app + ' entries from '
+                            + done + '/' + total + ' chunks';
+                    propagationSection.style.borderColor = '#fbbf24';
+                    stopPropagationPolling();
+                } else if (status === 'FAILED') {
+                    propagationStatus.textContent = '❌ FAILED — ' + (d.error || 'see server log');
+                    propagationSection.style.borderColor = 'var(--error)';
+                    if (Array.isArray(d.errors) && d.errors.length) {
+                        propagationStep.textContent = step + ' — first error: '
+                                + d.errors[0].split('\n')[0];
+                    }
+                    stopPropagationPolling();
+                }
+            } catch (err) {
+                propagationStatus.textContent = '⚠️ poll error: ' + err.message;
+            }
+        };
+        // Fire once immediately, then every 1.5s.
+        poll();
+        propagationTimer = setInterval(poll, 1500);
+    }
+
+    function stopPropagationPolling() {
+        if (propagationTimer) {
+            clearInterval(propagationTimer);
+            propagationTimer = null;
+        }
+    }
+
+    // ---- Boot ----
+    refreshHistoryInfo();
 </script>
 </body>
 </html>
