@@ -30,7 +30,7 @@ public class VideoCatalogService {
 
     private final ObjectMapper objectMapper;
 
-    @Value("${app.catalog.videos-file:../src/data/videos.json}")
+    @Value("${app.catalog.videos-file:C:/Git/projectExtraction/src/data/videos.json}")
     private String videosFilePath;
 
     public VideoCatalogService(ObjectMapper objectMapper) {

@@ -9,6 +9,13 @@ public class PipelineRequest {
     private String category;
     private String unknownActressName;
     private String actressId;
+    /**
+     * Optional direct URL of the performer's avatar, scraped from the
+     * source page (e.g. xhamster's tag JSON). The enrichment service
+     * downloads this and re-hosts it on Bunny CDN so the entry no longer
+     * depends on the source site.
+     */
+    private String actressAvatarUrl;
     private Long views;
     /** When true, the LLM enrichment step uses MiniMax instead of local Ollama. */
     private Boolean useMinimax;
@@ -41,6 +48,9 @@ public class PipelineRequest {
 
     public String getActressId() { return actressId; }
     public void setActressId(String actressId) { this.actressId = actressId; }
+
+    public String getActressAvatarUrl() { return actressAvatarUrl; }
+    public void setActressAvatarUrl(String actressAvatarUrl) { this.actressAvatarUrl = actressAvatarUrl; }
 
     public Long getViews() { return views; }
     public void setViews(Long views) { this.views = views; }

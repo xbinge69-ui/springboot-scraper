@@ -55,7 +55,7 @@ public class ProcessedUrlHistory {
     private final Set<String> urls = Collections.synchronizedSet(new HashSet<>());
 
     public ProcessedUrlHistory(
-            @Value("${app.history.processed-urls-file:../src/data/processed-urls.json}") String filePath
+            @Value("${app.history.processed-urls-file:C:/Git/projectExtraction/src/data/processed-urls.json}") String filePath
     ) {
         this.file = Paths.get(filePath);
     }

@@ -538,6 +538,13 @@ public class ScraperController {
                         ? info.getActress()
                         : info.getPornstars().get(0);
                 req.setUnknownActressName(firstPerformer.isBlank() ? "Anonymous" : firstPerformer);
+                // Look up the scraped avatar for the first pornstar. If
+                // the page didn't expose one, the request field stays null
+                // and the enrichment step simply skips the portrait upload.
+                String firstPerformerAvatar = firstPerformer.isBlank()
+                        ? null
+                        : info.getPornstarAvatars().get(firstPerformer);
+                req.setActressAvatarUrl(firstPerformerAvatar);
                 req.setActressId(null);
                 req.setViews(0L);
                 req.setUseMinimax(useMinimax);
@@ -655,7 +662,7 @@ public class ScraperController {
             EnrichmentMetadata meta = new EnrichmentMetadata(
                     title, description, category,
                     VideoEnrichmentService.parseTagsCsv(tags),
-                    unknownActressName, actressId);
+                    unknownActressName, actressId, null);
             return videoEnrichmentService.enrich(new EnrichmentSource.LocalFile(tmp, videoFile.getSize()), meta, false);
         } catch (IOException | RuntimeException e) {
             try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
@@ -708,7 +715,7 @@ public class ScraperController {
             EnrichmentMetadata meta = new EnrichmentMetadata(
                     title, description, category,
                     VideoEnrichmentService.parseTagsCsv(tags),
-                    unknownActressName, actressId);
+                    unknownActressName, actressId, null);
             return videoEnrichmentService.enrich(source, meta, false);
         } catch (IOException | RuntimeException e) {
             // If we managed to create a caller-side temp file (the upload case) and

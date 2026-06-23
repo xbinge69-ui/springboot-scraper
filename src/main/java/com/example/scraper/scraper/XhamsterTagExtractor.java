@@ -8,9 +8,11 @@ import org.jsoup.nodes.Element;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -51,7 +53,7 @@ public final class XhamsterTagExtractor {
 
     /** Empty-result singleton. Avoids allocating an empty record per failed call. */
     public static final XhamsterTags EMPTY = new XhamsterTags(
-            List.of(), List.of(), List.of(), List.of(), List.of());
+            List.of(), List.of(), List.of(), List.of(), List.of(), Map.of());
 
     /**
      * @return true when {@code url} looks like an xhamster video page
@@ -192,6 +194,9 @@ public final class XhamsterTagExtractor {
         List<String> categories = new ArrayList<>();
         List<String> channels = new ArrayList<>();
         List<String> brands = new ArrayList<>();
+        // name -> avatar URL. LinkedHashMap so the first occurrence wins
+        // and downstream iteration matches the order of the pornstars list.
+        Map<String, String> pornstarAvatars = new LinkedHashMap<>();
 
         for (JsonNode item : arr) {
             if (item == null || !item.isObject()) continue;
@@ -209,6 +214,13 @@ public final class XhamsterTagExtractor {
             if (isPornstar) {
                 pornstars.add(name);
                 all.add(name);  // actresses also surface as tags
+                // Capture the avatar URL if the JSON object has one. We
+                // don't want to overwrite a previously-seen value — first
+                // occurrence wins (LinkedHashMap.putIfAbsent semantics).
+                String avatar = pickAvatar(item);
+                if (avatar != null && !avatar.isBlank()) {
+                    pornstarAvatars.putIfAbsent(name, avatar);
+                }
             } else if (isCategory) {
                 categories.add(name);
                 all.add(name);
@@ -231,7 +243,8 @@ public final class XhamsterTagExtractor {
                 Collections.unmodifiableList(pornstars),
                 Collections.unmodifiableList(categories),
                 Collections.unmodifiableList(channels),
-                Collections.unmodifiableList(brands));
+                Collections.unmodifiableList(brands),
+                Collections.unmodifiableMap(pornstarAvatars));
     }
 
     /**
@@ -247,6 +260,26 @@ public final class XhamsterTagExtractor {
         if (n == null || n.isNull()) return null;
         String s = n.asText();
         return (s == null) ? null : s.trim();
+    }
+
+    /**
+     * xhamster's tag JSON object may carry the performer's avatar under
+     * one of several field names (the exact key has shifted across
+     * deploys). Try the known candidates in order and return the first
+     * non-blank absolute URL. Returns null when no avatar is present.
+     */
+    private static String pickAvatar(JsonNode item) {
+        for (String key : new String[]{"avatar", "thumbUrl", "thumb", "image", "pic", "photo"}) {
+            JsonNode v = item.get(key);
+            if (v == null || v.isNull()) continue;
+            String s = v.asText();
+            if (s == null) continue;
+            s = s.trim();
+            if (s.isBlank()) continue;
+            if (!s.startsWith("http://") && !s.startsWith("https://")) continue;
+            return s;
+        }
+        return null;
     }
 
     private static boolean boolField(JsonNode item, String field) {
@@ -265,7 +298,8 @@ public final class XhamsterTagExtractor {
             List<String> pornstars,
             List<String> categories,
             List<String> channels,
-            List<String> brands
+            List<String> brands,
+            Map<String, String> pornstarAvatars
     ) {
         public XhamsterTags {
             all       = all       == null ? List.of() : List.copyOf(all);
@@ -273,6 +307,9 @@ public final class XhamsterTagExtractor {
             categories= categories== null ? List.of() : List.copyOf(categories);
             channels  = channels  == null ? List.of() : List.copyOf(channels);
             brands    = brands    == null ? List.of() : List.copyOf(brands);
+            pornstarAvatars = pornstarAvatars == null
+                    ? Map.of()
+                    : Map.copyOf(pornstarAvatars);
         }
     }
 }

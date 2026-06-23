@@ -89,6 +89,11 @@ public class PageInfoService {
             info.setPornstars(new ArrayList<>(xh.pornstars()));
             info.setChannels(new ArrayList<>(xh.channels()));
             info.setCategories(new ArrayList<>(xh.categories()));
+            // Per-performer avatar URLs. The extractor drops the first
+            // (smallest) URL it finds in the JSON; we copy the whole map
+            // through so the controller can pick the URL for the first
+            // pornstar in one lookup.
+            info.setPornstarAvatars(new java.util.LinkedHashMap<>(xh.pornstarAvatars()));
         }
         collectMetaKeywords(doc, tags);
         collectLinkRelTags(doc, tags);

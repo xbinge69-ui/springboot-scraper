@@ -380,7 +380,7 @@ server.tomcat.max-swallow-size=-1
 server.tomcat.connection-timeout=120s
 
 # --- Catalog ---
-app.catalog.videos-file=../src/data/videos.json   # relative to JVM CWD
+app.catalog.videos-file=C:/Git/projectExtraction/src/data/videos.json   # absolute path
 
 # --- Bunny CDN (the only CDN — all derivatives go here) ---
 # The storage API key is sourced from the BUNNY_STORAGE_API_KEY
@@ -429,7 +429,7 @@ app.enrichment.sweeper-stale-minutes=60
 |----------|---------|---------|
 | `server.port` | `8080` | HTTP port |
 | `spring.servlet.multipart.max-file-size` | `2GB` | Max upload size |
-| `app.catalog.videos-file` | `../src/data/videos.json` | Where the catalog JSON is read/written |
+| `app.catalog.videos-file` | `C:/Git/projectExtraction/src/data/videos.json` | Where the catalog JSON is read/written |
 | `app.pipeline.mock-uploads` | `true` | (legacy, no longer used) |
 | `app.bunny.enabled` | `true` | Enable Bunny uploads (false short-circuits with mock URLs) |
 | `app.bunny.storage.api-key` | `${BUNNY_STORAGE_API_KEY:}` | Bunny storage API key (from env var) |

@@ -13,10 +13,11 @@ public record EnrichmentMetadata(
         String category,
         List<String> tags,
         String unknownActressName,
-        String actressId
+        String actressId,
+        String actressAvatarUrl
 ) {
     public static EnrichmentMetadata empty() {
-        return new EnrichmentMetadata(null, null, null, List.of(), null, null);
+        return new EnrichmentMetadata(null, null, null, List.of(), null, null, null);
     }
 
     public String titleOrFallback() {

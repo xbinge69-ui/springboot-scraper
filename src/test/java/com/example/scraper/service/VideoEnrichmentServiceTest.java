@@ -133,7 +133,7 @@ class VideoEnrichmentServiceTest {
         EnrichmentMetadata meta = new EnrichmentMetadata(
                 "My Draft Title", "An authentic bedroom encounter.",
                 "Amateur", List.of("amateur", "couple"),
-                null, null);
+                null, null, null);
 
         Path input = fixtureAsInput();
         long inputSize = Files.size(input);
@@ -210,7 +210,7 @@ class VideoEnrichmentServiceTest {
         EnrichmentMetadata meta = new EnrichmentMetadata(
                 "Fallback Title", "Some description.",
                 "Amateur", List.of("amateur", "couple"),
-                "Jane Doe", null);
+                "Jane Doe", null, null);
 
         Path input = fixtureAsInput();
         PipelineOutcome outcome = service.enrich(
@@ -256,7 +256,7 @@ class VideoEnrichmentServiceTest {
                 ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
                 120, 50_000_000L, 5, 30, 60, "json", 0.2);
 
-        EnrichmentMetadata meta = new EnrichmentMetadata("Test", null, null, null, null, null);
+        EnrichmentMetadata meta = new EnrichmentMetadata("Test", null, null, null, null, null, null);
         Path input = fixtureAsInput();
 
         assertThatThrownBy(() -> service.enrich(

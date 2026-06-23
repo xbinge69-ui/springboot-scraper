@@ -14,6 +14,7 @@ class TopicalAuthorityPromptTest {
             "Amateur",
             List.of("amateur", "couple", "oral"),
             null,
+            null,
             null
     );
 

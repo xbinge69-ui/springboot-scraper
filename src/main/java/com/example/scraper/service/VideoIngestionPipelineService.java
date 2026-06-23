@@ -65,7 +65,8 @@ public class VideoIngestionPipelineService {
                 request.getCategory(),
                 parseTags(request.getTags()),
                 request.getUnknownActressName(),
-                request.getActressId());
+                request.getActressId(),
+                request.getActressAvatarUrl());
 
         return videoEnrichmentService.enrich(
                 new EnrichmentSource.RemoteUrl(sourceVideoUrl, request.getSourcePageUrl()),

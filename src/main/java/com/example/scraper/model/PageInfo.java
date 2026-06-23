@@ -1,7 +1,9 @@
 package com.example.scraper.model;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Lightweight page-level info scraped from a source URL.
@@ -24,6 +26,13 @@ public class PageInfo {
      * populated with the first entry of this list when the list is non-empty.
      */
     private List<String> pornstars = new ArrayList<>();
+    /**
+     * Avatar URL for each pornstar name, scraped from the source page
+     * (e.g. xhamster's tag JSON). Keys are entries from {@link #pornstars};
+     * values are the avatar/thumbnail URL. Empty for source pages that
+     * don't expose performer avatars.
+     */
+    private Map<String, String> pornstarAvatars = new LinkedHashMap<>();
     /**
      * All channels detected on the page (e.g. xhamster's "LMAO GFs").
      * Channels are the producing studio/brand, not a content tag.
@@ -65,6 +74,11 @@ public class PageInfo {
 
     public List<String> getPornstars() { return pornstars; }
     public void setPornstars(List<String> pornstars) { this.pornstars = pornstars == null ? new ArrayList<>() : pornstars; }
+
+    public Map<String, String> getPornstarAvatars() { return pornstarAvatars; }
+    public void setPornstarAvatars(Map<String, String> pornstarAvatars) {
+        this.pornstarAvatars = pornstarAvatars == null ? new LinkedHashMap<>() : pornstarAvatars;
+    }
 
     public List<String> getChannels() { return channels; }
     public void setChannels(List<String> channels) { this.channels = channels == null ? new ArrayList<>() : channels; }

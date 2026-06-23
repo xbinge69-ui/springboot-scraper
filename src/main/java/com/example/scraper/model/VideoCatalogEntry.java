@@ -22,6 +22,14 @@ public class VideoCatalogEntry {
     private String publishedAt;
     private String actressId;
     private String unknownActressName;
+    /**
+     * CDN URL of the performer's portrait photo. Sourced by scraping
+     * the page (e.g. xhamster's tag JSON), downloaded into the JVM,
+     * and re-uploaded to Bunny under a {@code .portrait.jpg} key.
+     * Distinct from {@link #thumbnailKey}, which is a single frame
+     * from the video itself. Null when no avatar was available.
+     */
+    private String actressPortraitKey;
     private long views;
     /**
      * Optional per-entry pipeline stats: input size, compressed size,
@@ -75,6 +83,9 @@ public class VideoCatalogEntry {
 
     public String getUnknownActressName() { return unknownActressName; }
     public void setUnknownActressName(String unknownActressName) { this.unknownActressName = unknownActressName; }
+
+    public String getActressPortraitKey() { return actressPortraitKey; }
+    public void setActressPortraitKey(String actressPortraitKey) { this.actressPortraitKey = actressPortraitKey; }
 
     public long getViews() { return views; }
     public void setViews(long views) { this.views = views; }

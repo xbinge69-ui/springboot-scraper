@@ -22,9 +22,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URL;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -289,11 +294,11 @@ public class VideoEnrichmentService {
         // ----- Steps 4-5: upload all 3 derivatives to Bunny (the only CDN) -----
         String slugHint = Slugify.slugify(metadata.titleOrFallback());
         String uuid = BunnyAssetService.newRequestUuid();
+        String folder = bunny.getFolder();
         String thumbnailUrl, previewUrl, compressedUrl;
         try (EnrichmentTempFiles ignored = new EnrichmentTempFiles(
                 inputPath, derivatives.thumbnailPath(), derivatives.previewPath(), derivatives.compressedPath())) {
 
-            String folder = bunny.getFolder();
             thumbnailUrl  = bunny.uploadBytes(derivatives.thumbnailPath(),
                     folder + "/" + slugHint + "-" + uuid + ".thumbnail.jpg",  "image/jpeg");
             previewUrl    = bunny.uploadBytes(derivatives.previewPath(),
@@ -304,6 +309,26 @@ public class VideoEnrichmentService {
             deleteRecursively(tempDir);
             throw new IOException("bunny upload failed: " + e.getMessage(), e);
         }
+
+        // ----- Step 6 (optional): fetch the actress portrait from the
+        // source page and re-host it on Bunny. We do this AFTER the
+        // heavy 3 uploads (thumbnail + compressed + preview) so a
+        // network blip on the avatar URL doesn't fail the run — the
+        // warning list captures the failure and the entry is still
+        // persisted without a portrait. The portrait is downloaded
+        // from the scraped URL (xhamster's tag JSON) and never
+        // re-resolved, so the entry is no longer tied to the source
+        // site.
+        String portraitUrl = null;
+        if (metadata.actressAvatarUrl() != null && !metadata.actressAvatarUrl().isBlank()) {
+            try {
+                portraitUrl = fetchAndUploadActressPortrait(
+                        metadata.actressAvatarUrl(), tempDir, slugHint, uuid, folder);
+            } catch (Exception e) {
+                warnings.add("Actress portrait fetch/upload failed: " + e.getMessage());
+            }
+        }
+
         if (job != null) job.updateProgress(80, "Running LLM enrichment");
 
         // No second CDN — backupEmbedUrl mirrors embedUrl (the compressed
@@ -354,6 +379,7 @@ public class VideoEnrichmentService {
         entry.setPublishedAt(Instant.now().toString());
         entry.setActressId(metadata.actressId());
         entry.setUnknownActressName(metadata.unknownActressNameOrFallback());
+        entry.setActressPortraitKey(portraitUrl);
         entry.setViews(llm.views());
         entry.setStats(stats);
 
@@ -450,6 +476,136 @@ public class VideoEnrichmentService {
         } catch (IOException ignored) {
             // Best-effort cleanup.
         }
+    }
+
+    // ---- Actress portrait fetch (xhamster avatar -> Bunny) ----
+
+    /** Connect timeout for the avatar HTTP fetch. */
+    private static final int PORTRAIT_CONNECT_TIMEOUT_MS = 10_000;
+    /** Read timeout for the avatar HTTP fetch. */
+    private static final int PORTRAIT_READ_TIMEOUT_MS = 15_000;
+    /** Hard cap on the avatar download size. 12 MB is well above any real
+     * performer photo; anything bigger is a corrupt/misnamed resource. */
+    private static final long PORTRAIT_MAX_BYTES = 12L * 1024 * 1024;
+    /** Stream copy buffer. */
+    private static final int PORTRAIT_BUFFER_BYTES = 32 * 1024;
+
+    /**
+     * Download the actress avatar from the source page (e.g. xhamster's
+     * tag JSON) into a temp file under {@code tempDir}, upload it to
+     * Bunny under {@code <slug>-<uuid>.portrait.<ext>}, then delete the
+     * temp file. Returns the public CDN URL of the uploaded portrait.
+     *
+     * <p>The download is best-effort: any failure throws an
+     * {@link IOException} which the caller converts into a warning
+     * (the entry is still persisted, just without a portrait). The
+     * size cap protects us from a runaway download; the connect/read
+     * timeouts match the existing {@link HttpVideoDownloader} style.
+     *
+     * <p>File extension is inferred from the response's
+     * {@code Content-Type} header (jpg/png/webp). When unknown, the
+     * extension is omitted from the Bunny key — Bunny stores the bytes
+     * either way and serves them with the content-type we set on PUT.
+     */
+    private String fetchAndUploadActressPortrait(String remoteUrl,
+                                                 Path tempDir,
+                                                 String slugHint,
+                                                 String uuid,
+                                                 String folder) throws IOException {
+        URI uri;
+        try {
+            uri = URI.create(remoteUrl);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("invalid avatar URL: " + remoteUrl, e);
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+            throw new IOException("avatar URL must be http(s): " + remoteUrl);
+        }
+
+        HttpURLConnection conn = (HttpURLConnection) new URL(remoteUrl).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(PORTRAIT_CONNECT_TIMEOUT_MS);
+        conn.setReadTimeout(PORTRAIT_READ_TIMEOUT_MS);
+        // Send a browser UA + Referer so xhamster doesn't 403 the image.
+        conn.setRequestProperty("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        conn.setRequestProperty("Accept", "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5");
+        conn.setInstanceFollowRedirects(true);
+        conn.connect();
+
+        int status = conn.getResponseCode();
+        if (status < 200 || status >= 300) {
+            conn.disconnect();
+            throw new IOException("avatar fetch HTTP " + status + " for " + remoteUrl);
+        }
+
+        String contentType = conn.getContentType();
+        String ext = extensionForContentType(contentType);
+        String objectKey = folder + "/" + slugHint + "-" + uuid
+                + (ext == null ? ".portrait" : ".portrait" + ext);
+        String bunnyContentType = (contentType != null && !contentType.isBlank())
+                ? contentType
+                : "image/jpeg";
+
+        Path tempFile = Files.createTempFile(tempDir, "portrait-", ext == null ? ".img" : ext);
+        try (InputStream in = conn.getInputStream()) {
+            long copied = copyBounded(in, tempFile, PORTRAIT_MAX_BYTES);
+            if (copied == 0) {
+                throw new IOException("avatar response was empty: " + remoteUrl);
+            }
+        } finally {
+            conn.disconnect();
+        }
+        try {
+            return bunny.uploadBytes(tempFile, objectKey, bunnyContentType);
+        } finally {
+            try { Files.deleteIfExists(tempFile); } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * Copy up to {@code maxBytes} from {@code in} into {@code target}.
+     * Returns the number of bytes copied. Throws {@link IOException} if
+     * the source has more than {@code maxBytes} to give.
+     */
+    private static long copyBounded(InputStream in, Path target, long maxBytes) throws IOException {
+        long total = 0;
+        byte[] buf = new byte[PORTRAIT_BUFFER_BYTES];
+        try (var out = Files.newOutputStream(target, StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                total += n;
+                if (total > maxBytes) {
+                    throw new IOException("avatar exceeds " + maxBytes + " bytes");
+                }
+                out.write(buf, 0, n);
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Map an HTTP {@code Content-Type} to a Bunny object-key extension.
+     * Returns null for unknown types so the caller can omit the
+     * extension from the key.
+     */
+    private static String extensionForContentType(String contentType) {
+        if (contentType == null) return null;
+        String ct = contentType.toLowerCase(java.util.Locale.ROOT);
+        // Strip parameters, e.g. "image/jpeg; charset=utf-8"
+        int semi = ct.indexOf(';');
+        if (semi >= 0) ct = ct.substring(0, semi).trim();
+        return switch (ct) {
+            case "image/jpeg", "image/jpg" -> ".jpg";
+            case "image/png"              -> ".png";
+            case "image/webp"             -> ".webp";
+            case "image/gif"              -> ".gif";
+            case "image/avif"             -> ".avif";
+            default                       -> null;
+        };
     }
 
     // ---- Convenience used by the controller ----
