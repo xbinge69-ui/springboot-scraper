@@ -4,6 +4,7 @@ import com.example.scraper.model.PageInfo;
 import com.example.scraper.model.VideoResult;
 import com.example.scraper.scraper.SiteScraper;
 import com.example.scraper.scraper.XhamsterTagExtractor;
+import com.example.scraper.util.HttpPageFetcher;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -28,12 +29,16 @@ import java.util.List;
 @Service
 public class PageInfoService {
 
-    private static final int TIMEOUT_MS = 15_000;
-
     private final List<SiteScraper> scrapers;
+    // Cloudflare-fronted sites reject Jsoup's HttpURLConnection TLS
+    // fingerprint with HTTP 403 even when the User-Agent header looks
+    // like a browser. HttpPageFetcher uses the Java 11 HttpClient,
+    // which gets through with the same UA string.
+    private final HttpPageFetcher pageFetcher;
 
-    public PageInfoService(List<SiteScraper> scrapers) {
+    public PageInfoService(List<SiteScraper> scrapers, HttpPageFetcher pageFetcher) {
         this.scrapers = scrapers;
+        this.pageFetcher = pageFetcher;
     }
 
     /**
@@ -52,15 +57,8 @@ public class PageInfoService {
         }
 
         PageInfo info = new PageInfo(trimmed);
-        Document doc = Jsoup.connect(trimmed)
-                .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        + "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        + "Chrome/124.0.0.0 Safari/537.36")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                .timeout(TIMEOUT_MS)
-                .followRedirects(true)
-                .get();
+        String html = pageFetcher.fetch(trimmed);
+        Document doc = Jsoup.parse(html, trimmed);
 
         info.setSite(detectSite(doc, trimmed));
         info.setTitle(firstNonBlank(

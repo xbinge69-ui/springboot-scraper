@@ -1,20 +1,16 @@
 package com.example.scraper.service;
 
+import com.example.scraper.util.HttpPageFetcher;
 import jakarta.annotation.PreDestroy;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -27,7 +23,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -40,11 +35,12 @@ import java.util.regex.Pattern;
  * <p><b>Redirect resolution:</b> ixxx.com doesn't put the real source
  * URL in the anchor. The href is an aggregator-side redirect
  * (e.g. {@code /out/?l=...&c=...&v=...}) that lands on the actual
- * source page after one or more server-side 3xx hops. We fetch each
- * redirect in parallel with {@link HttpClient} (which follows redirects
- * natively) and read the final URI from the response. If the response
- * is 200 and the body is a tiny "click-through" HTML page with a
- * {@code <meta http-equiv="refresh">}, we use that URL instead.
+ * source page after one or more server-side 3xx hops (and occasionally
+ * a {@code <meta http-equiv="refresh">} click-through). We fetch each
+ * redirect in parallel through {@link HttpPageFetcher}, which drives a
+ * real headless Chrome via Selenium — necessary because ixxx.com now
+ * serves a Cloudflare JS proof-of-work challenge to non-browser
+ * clients, which {@code java.net.http.HttpClient} cannot pass.
  *
  * <p><b>Source site handling:</b> we don't assume the source is
  * xhamster. We look at every resolved link, group by host, and pick
@@ -57,23 +53,11 @@ import java.util.regex.Pattern;
 @Service
 public class IxxxDiscoveryService {
 
-    private static final int PAGE_TIMEOUT_MS = 15_000;
-    private static final Duration REDIRECT_CONNECT_TIMEOUT = Duration.ofSeconds(5);
-    private static final Duration REDIRECT_REQUEST_TIMEOUT  = Duration.ofSeconds(10);
-    private static final int REDIRECT_TOTAL_TIMEOUT_SECONDS = 20;
     private static final int MAX_REDIRECTS_PER_PAGE = 60;
     private static final int REDIRECT_POOL_SIZE = 10;
+    private static final int REDIRECT_RESOLVE_TIMEOUT_SECONDS = 60;
 
-    private static final String BROWSER_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    + "Chrome/124.0.0.0 Safari/537.36";
-
-    /**
-     * Path prefixes that are obviously NOT individual video pages on
-     * any of the supported source sites (channels, categories, users,
-     * login, search, trending landing pages, etc.).
-     */
+    /** Path prefixes that are NOT video pages on any supported source site. */
     private static final Pattern NON_VIDEO_PATH = Pattern.compile(
             "^/(?:channels|categories|users?|user-profile|amateurs?|pornstars?"
                     + "|models?|search|live|login|signup|sign-in|register|about"
@@ -83,24 +67,18 @@ public class IxxxDiscoveryService {
                     + "|^/(?:trending|popular|best|top-rated|most-viewed|longest|new|latest|hd)\\b",
             Pattern.CASE_INSENSITIVE);
 
-    /**
-     * Aggregator redirect paths we resolve. ixxx.com uses {@code /out/}
-     * — the others are forward-compat with similar sites.
-     */
+    /** Aggregator redirect paths we resolve. ixxx.com uses {@code /out/}. */
     private static final Pattern AGGREGATOR_REDIRECT_PATH = Pattern.compile(
             "^/(?:out|redirect|goto|link)/?$", Pattern.CASE_INSENSITIVE);
 
-    /** Capture the destination of a {@code <meta http-equiv="refresh">}. */
-    private static final Pattern META_REFRESH = Pattern.compile(
-            "<meta[^>]*http-equiv\\s*=\\s*[\"']?refresh[\"']?[^>]*"
-                    + "content\\s*=\\s*[\"']?\\d+\\s*;?\\s*url\\s*=\\s*([^\"'\\s>]+)",
-            Pattern.CASE_INSENSITIVE);
+    private final HttpPageFetcher pageFetcher;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(REDIRECT_CONNECT_TIMEOUT)
-            .followRedirects(HttpClient.Redirect.NORMAL) // follows HTTP→HTTP and HTTPS→HTTPS
-            .build();
-
+    /**
+     * Orchestrates parallel resolution calls. Actual driver use is
+     * capped at {@code app.fetcher.pool-size} (default 4) inside
+     * {@link HttpPageFetcher}; this pool can be larger — extra threads
+     * just queue waiting for a driver.
+     */
     private final ExecutorService redirectExecutor = Executors.newFixedThreadPool(
             REDIRECT_POOL_SIZE,
             r -> {
@@ -108,6 +86,10 @@ public class IxxxDiscoveryService {
                 t.setDaemon(true);
                 return t;
             });
+
+    public IxxxDiscoveryService(HttpPageFetcher pageFetcher) {
+        this.pageFetcher = pageFetcher;
+    }
 
     public DiscoveryResult discover(String searchUrl, String sourceHost, boolean videosOnly)
             throws IOException {
@@ -138,14 +120,10 @@ public class IxxxDiscoveryService {
         }
         String aggregatorHost = host.toLowerCase(Locale.ROOT);
 
-        // Fetch the search-results HTML.
-        Document doc = Jsoup.connect(url)
-                .userAgent(BROWSER_UA)
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .referrer("https://www.google.com/")
-                .timeout(PAGE_TIMEOUT_MS)
-                .get();
+        // Fetch the search-results HTML via headless Chrome so the
+        // Cloudflare JS challenge is solved before Jsoup parses.
+        String html = pageFetcher.fetch(url, "https://www.google.com/");
+        Document doc = Jsoup.parse(html, url);
 
         // Step 1: split anchors into "needs redirect resolution" and
         // "already points at an external site".
@@ -189,7 +167,7 @@ public class IxxxDiscoveryService {
         }
 
         // Step 2: resolve every redirect in parallel. Each call returns
-        // the final URL after the 3xx chain (or a meta-refresh target).
+        // the final URL after Chrome follows any 3xx hops.
         List<String> resolved = resolveRedirectsParallel(uniqueRedirects);
         int redirectsResolved = resolved.size();
 
@@ -268,53 +246,26 @@ public class IxxxDiscoveryService {
         List<CompletableFuture<String>> futures = new ArrayList<>(ixxxUrls.size());
         for (String u : ixxxUrls) {
             futures.add(CompletableFuture.supplyAsync(
-                    () -> resolveFinalUrl(u), redirectExecutor));
+                    () -> {
+                        try {
+                            return pageFetcher.resolveFinalUrl(u);
+                        } catch (Exception e) {
+                            return null;
+                        }
+                    },
+                    redirectExecutor));
         }
         List<String> resolved = new ArrayList<>(ixxxUrls.size());
         for (CompletableFuture<String> f : futures) {
             try {
-                String r = f.get(REDIRECT_TOTAL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                String r = f.get(REDIRECT_RESOLVE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 if (r != null && !r.isBlank()) resolved.add(r);
             } catch (Exception e) {
-                // skip on timeout/error
+                // skip on timeout/error — the URL just won't appear
+                // in the discovery result
             }
         }
         return resolved;
-    }
-
-    private String resolveFinalUrl(String ixxxHref) {
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(ixxxHref))
-                    .timeout(REDIRECT_REQUEST_TIMEOUT)
-                    .header("User-Agent", BROWSER_UA)
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("Referer", "https://www.ixxx.com/")
-                    .GET()
-                    .build();
-            // Read the body too — if the response is 200 (no redirect
-            // hop), the destination is probably in a meta-refresh tag.
-            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            URI finalUri = resp.uri();
-            String s = finalUri != null ? finalUri.toString() : null;
-            if (resp.statusCode() == 200 && resp.body() != null && resp.body().length() <= 16_000) {
-                Matcher m = META_REFRESH.matcher(resp.body());
-                if (m.find()) {
-                    String target = m.group(1);
-                    if (target != null && !target.isBlank()) {
-                        if (target.startsWith("/") && s != null) {
-                            try { return URI.create(s).resolve(target).toString(); }
-                            catch (Exception e) { return target; }
-                        }
-                        return target;
-                    }
-                }
-            }
-            return s;
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     private boolean isVideoPage(String href) {

@@ -22,6 +22,21 @@
         <java.version>21</java.version>
     </properties>
 
+    <dependencyManagement>
+        <dependencies>
+            <!-- Pin Selenium to 4.25. Spring Boot's BOM doesn't manage
+                 these, so we import the Selenium BOM explicitly to keep
+                 selenium-java / selenium-chrome-driver versions aligned. -->
+            <dependency>
+                <groupId>org.seleniumhq.selenium</groupId>
+                <artifactId>selenium-bom</artifactId>
+                <version>4.25.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <!-- Spring Web MVC -->
         <dependency>
@@ -47,6 +62,20 @@
             <groupId>net.bramp.ffmpeg</groupId>
             <artifactId>ffmpeg</artifactId>
             <version>0.9.2</version>
+        </dependency>
+
+        <!-- Selenium WebDriver — drives a real headless Chrome so we can
+             pass Cloudflare's JavaScript challenges (Jsoup/HttpClient TLS
+             fingerprints are blocked even when the UA looks like Chrome).
+             Selenium Manager auto-downloads the ChromeDriver matching the
+             user's installed Chrome at first launch. -->
+        <dependency>
+            <groupId>org.seleniumhq.selenium</groupId>
+            <artifactId>selenium-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.seleniumhq.selenium</groupId>
+            <artifactId>selenium-chrome-driver</artifactId>
         </dependency>
 
         <!-- Jackson for JSON processing -->
