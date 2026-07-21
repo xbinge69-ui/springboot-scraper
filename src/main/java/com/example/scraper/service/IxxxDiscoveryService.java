@@ -5,13 +5,15 @@ import jakarta.annotation.PreDestroy;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,6 +33,22 @@ import java.util.regex.Pattern;
  * URL's query params) and pulls every external video page link it
  * can find. Used by the batch-pipeline UI to bulk-import URLs without
  * copy/pasting them one by one.
+ *
+ * <p><b>Pagination:</b> the search results span multiple pages; one
+ * call to {@link #discover(String, String, boolean, String)} can fetch
+ * any number of pages. The {@code pagesInput} parameter accepts:
+ * <ul>
+ *   <li>empty / null → page 1 only (backward-compatible default)</li>
+ *   <li>singletons — e.g. {@code "3"} → page 3</li>
+ *   <li>comma-separated lists — e.g. {@code "2,3,5"} → pages 2, 3, 5</li>
+ *   <li>ranges — e.g. {@code "2-5"} → pages 2, 3, 4, 5</li>
+ *   <li>mixed — e.g. {@code "1-3,5,7-9"} → pages 1, 2, 3, 5, 7, 8, 9</li>
+ * </ul>
+ * Duplicates are removed and the result is sorted ascending. The
+ * service caps total pages at {@link #MAX_PAGES_PER_DISCOVERY} so a
+ * fat-finger can't queue hours of work. Per-page failures are recorded
+ * in {@link DiscoveryResult#perPage()} and don't abort the rest of the
+ * request — partial success is more useful here than a hard fail.
  *
  * <p><b>Redirect resolution:</b> ixxx.com doesn't put the real source
  * URL in the anchor. The href is an aggregator-side redirect
@@ -53,9 +71,13 @@ import java.util.regex.Pattern;
 @Service
 public class IxxxDiscoveryService {
 
+    private static final Logger log = LoggerFactory.getLogger(IxxxDiscoveryService.class);
+
     private static final int MAX_REDIRECTS_PER_PAGE = 60;
     private static final int REDIRECT_POOL_SIZE = 10;
     private static final int REDIRECT_RESOLVE_TIMEOUT_SECONDS = 60;
+    /** Safety cap on how many pages one discovery call may scrape. */
+    static final int MAX_PAGES_PER_DISCOVERY = 50;
 
     /** Path prefixes that are NOT video pages on any supported source site. */
     private static final Pattern NON_VIDEO_PATH = Pattern.compile(
@@ -91,8 +113,28 @@ public class IxxxDiscoveryService {
         this.pageFetcher = pageFetcher;
     }
 
+    /** Single-page shortcut — equivalent to {@code discover(url, sourceHost, videosOnly, "")}. */
     public DiscoveryResult discover(String searchUrl, String sourceHost, boolean videosOnly)
             throws IOException {
+        return discover(searchUrl, sourceHost, videosOnly, "");
+    }
+
+    /**
+     * Fetches the aggregator search results across the requested pages
+     * and pulls every external video-page link.
+     *
+     * @param searchUrl  the search/category URL on the aggregator
+     * @param sourceHost optional override pinning the result to a specific
+     *                   source host (e.g. {@code "xhamster.com"}); the
+     *                   most-popular host is picked if blank
+     * @param videosOnly when {@code true}, drop non-video pages via
+     *                   {@link #NON_VIDEO_PATH}
+     * @param pagesInput page numbers to scrape (see class javadoc); empty
+     *                   or null means page 1 only
+     */
+    public DiscoveryResult discover(String searchUrl, String sourceHost, boolean videosOnly,
+                                    String pagesInput) throws IOException {
+        // ---- 1. Validate base URL ----
         if (searchUrl == null || searchUrl.isBlank()) {
             throw new IllegalArgumentException("url is required");
         }
@@ -100,7 +142,6 @@ public class IxxxDiscoveryService {
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             url = "https://" + url;
         }
-
         URI uri;
         try {
             uri = URI.create(url);
@@ -120,13 +161,89 @@ public class IxxxDiscoveryService {
         }
         String aggregatorHost = host.toLowerCase(Locale.ROOT);
 
-        // Fetch the search-results HTML via headless Chrome so the
-        // Cloudflare JS challenge is solved before Jsoup parses.
-        String html = pageFetcher.fetch(url, "https://www.google.com/");
-        Document doc = Jsoup.parse(html, url);
+        // ---- 2. Parse pages input ----
+        List<Integer> pages = parsePagesInput(pagesInput);
 
-        // Step 1: split anchors into "needs redirect resolution" and
-        // "already points at an external site".
+        // ---- 3. Extract each page; aggregate results across all pages ----
+        Map<String, Set<String>> perHost = new LinkedHashMap<>();
+        List<PageOutcome> perPage = new ArrayList<>(pages.size());
+        int totalRedirectsFound = 0;
+        int totalRedirectsResolved = 0;
+
+        for (int pageNum : pages) {
+            String pageUrl = buildPageUrl(url, pageNum);
+            PageOutcome outcome;
+            try {
+                outcome = extractPage(pageNum, pageUrl, aggregatorHost, videosOnly);
+            } catch (Exception e) {
+                log.warn("ixxx discovery: page {} failed: {}", pageNum, e.getMessage());
+                outcome = PageOutcome.failed(pageNum, pageUrl, e.getMessage());
+            }
+            mergeInto(perHost, outcome.buckets());
+            totalRedirectsFound += outcome.redirectsFound();
+            totalRedirectsResolved += outcome.redirectsResolved();
+            perPage.add(outcome);
+        }
+
+        int pagesFetched = (int) perPage.stream().filter(p -> p.error() == null).count();
+
+        // ---- 4. Rank hosts by count, tie-broken alphabetically ----
+        List<Map.Entry<String, Integer>> ranked = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> e : perHost.entrySet()) {
+            ranked.add(Map.entry(e.getKey(), e.getValue().size()));
+        }
+        ranked.sort(Comparator
+                .<Map.Entry<String, Integer>>comparingInt(Map.Entry::getValue).reversed()
+                .thenComparing(Map.Entry::getKey));
+
+        // ---- 5. Pick chosen host ----
+        String chosen = null;
+        Set<String> chosenUrls = null;
+        if (sourceHost != null && !sourceHost.isBlank()) {
+            String want = sourceHost.toLowerCase(Locale.ROOT);
+            for (Map.Entry<String, Set<String>> e : perHost.entrySet()) {
+                if (e.getKey().equals(want) || e.getKey().endsWith("." + want)) {
+                    chosen = e.getKey();
+                    chosenUrls = e.getValue();
+                    break;
+                }
+            }
+            if (chosen == null) {
+                throw new IllegalArgumentException(
+                        "no " + sourceHost + " links found on those pages");
+            }
+        } else if (!ranked.isEmpty()) {
+            chosen = ranked.get(0).getKey();
+            chosenUrls = perHost.get(chosen);
+        }
+
+        List<HostCount> sourcesJson = new ArrayList<>();
+        for (Map.Entry<String, Integer> e : ranked) {
+            sourcesJson.add(new HostCount(e.getKey(), e.getValue()));
+        }
+
+        return new DiscoveryResult(
+                url,
+                chosen,
+                sourcesJson,
+                chosenUrls == null ? List.of() : new ArrayList<>(chosenUrls),
+                totalRedirectsFound,
+                totalRedirectsResolved,
+                pages,
+                pagesFetched,
+                perPage);
+    }
+
+    /**
+     * Fetches one page, splits anchors into "needs redirect resolution"
+     * vs "already external", resolves every redirect in parallel, then
+     * buckets the final URLs by host.
+     */
+    private PageOutcome extractPage(int pageNum, String pageUrl, String aggregatorHost,
+                                    boolean videosOnly) throws IOException {
+        String html = pageFetcher.fetch(pageUrl);
+        Document doc = Jsoup.parse(html, pageUrl);
+
         List<String> redirectUrls = new ArrayList<>();
         List<String> directExternal = new ArrayList<>();
         for (Element a : doc.select("a[href]")) {
@@ -166,64 +283,132 @@ public class IxxxDiscoveryService {
             uniqueRedirects = uniqueRedirects.subList(0, MAX_REDIRECTS_PER_PAGE);
         }
 
-        // Step 2: resolve every redirect in parallel. Each call returns
-        // the final URL after Chrome follows any 3xx hops.
+        // Resolve every redirect in parallel. Each call returns the
+        // final URL after Chrome follows any 3xx hops.
         List<String> resolved = resolveRedirectsParallel(uniqueRedirects);
         int redirectsResolved = resolved.size();
 
-        // Step 3: combine resolved URLs with any direct external URLs
-        // and bucket by host. Apply the video-page chrome filter here,
-        // on the final URL, not on the aggregator's redirect URL.
-        Map<String, Set<String>> perHost = new LinkedHashMap<>();
+        // Bucket the final URLs by host. Apply the video-page chrome
+        // filter on the final URL, not on the aggregator's redirect.
+        Map<String, Set<String>> buckets = new LinkedHashMap<>();
         for (String finalUrl : resolved) {
-            bucket(perHost, finalUrl, videosOnly);
+            bucket(buckets, finalUrl, videosOnly);
         }
         for (String finalUrl : directExternal) {
-            bucket(perHost, finalUrl, videosOnly);
+            bucket(buckets, finalUrl, videosOnly);
         }
+        buckets.values().removeIf(Set::isEmpty);
 
-        // Rank hosts by count, tie-broken alphabetically.
-        List<Map.Entry<String, Integer>> ranked = new ArrayList<>();
-        for (Map.Entry<String, Set<String>> e : perHost.entrySet()) {
-            ranked.add(Map.entry(e.getKey(), e.getValue().size()));
+        int bucketedCount = buckets.values().stream().mapToInt(Set::size).sum();
+        log.info("ixxx discovery: page {} → {} redirect(s), {} resolved, {} URL(s) bucketed",
+                pageNum, redirectsFound, redirectsResolved, bucketedCount);
+
+        return new PageOutcome(pageNum, pageUrl, redirectsFound, redirectsResolved, buckets, null);
+    }
+
+    /** Union of a per-page bucket map into an aggregate (deduped by normalized URL). */
+    private void mergeInto(Map<String, Set<String>> aggregate, Map<String, Set<String>> pageBuckets) {
+        for (Map.Entry<String, Set<String>> e : pageBuckets.entrySet()) {
+            aggregate.computeIfAbsent(e.getKey(), k -> new LinkedHashSet<>()).addAll(e.getValue());
         }
-        ranked.sort(Comparator
-                .<Map.Entry<String, Integer>>comparingInt(Map.Entry::getValue).reversed()
-                .thenComparing(Map.Entry::getKey));
+    }
 
-        // Step 4: pick the chosen host. Caller may pin one explicitly.
-        String chosen = null;
-        Set<String> chosenUrls = null;
-        if (sourceHost != null && !sourceHost.isBlank()) {
-            String want = sourceHost.toLowerCase(Locale.ROOT);
-            for (Map.Entry<String, Set<String>> e : perHost.entrySet()) {
-                if (e.getKey().equals(want) || e.getKey().endsWith("." + want)) {
-                    chosen = e.getKey();
-                    chosenUrls = e.getValue();
-                    break;
+    /**
+     * Parses the pages input string. Accepts:
+     * <ul>
+     *   <li>empty / null / blank → page 1 only</li>
+     *   <li>singletons: {@code "3"} → that page</li>
+     *   <li>comma-separated: {@code "2,3,5"} → those pages</li>
+     *   <li>ranges: {@code "2-5"} → pages 2, 3, 4, 5</li>
+     *   <li>mixed: {@code "1-3,5,7-9"} → union of all of the above</li>
+     * </ul>
+     * Duplicates are removed, results are sorted ascending. Throws
+     * {@link IllegalArgumentException} on any non-integer token, a
+     * page number below 1, an inverted range, or a total above
+     * {@link #MAX_PAGES_PER_DISCOVERY}.
+     */
+    public static List<Integer> parsePagesInput(String input) {
+        if (input == null || input.isBlank()) return List.of(1);
+        LinkedHashSet<Integer> out = new LinkedHashSet<>();
+        for (String rawPart : input.trim().split(",")) {
+            String chunk = rawPart.trim();
+            if (chunk.isEmpty()) continue;
+            int dash = chunk.indexOf('-');
+            if (dash < 0) {
+                int n;
+                try {
+                    n = Integer.parseInt(chunk);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("pages: not an integer: '" + chunk + "'");
                 }
+                if (n < 1) {
+                    throw new IllegalArgumentException("pages: must be >= 1, got " + n);
+                }
+                out.add(n);
+            } else {
+                String from = chunk.substring(0, dash).trim();
+                String to = chunk.substring(dash + 1).trim();
+                if (from.isEmpty() || to.isEmpty()) {
+                    throw new IllegalArgumentException("pages: invalid range '" + chunk + "'");
+                }
+                int start;
+                int end;
+                try {
+                    start = Integer.parseInt(from);
+                    end = Integer.parseInt(to);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            "pages: not an integer in range '" + chunk + "'");
+                }
+                if (start < 1 || end < 1) {
+                    throw new IllegalArgumentException(
+                            "pages: range endpoints must be >= 1: '" + chunk + "'");
+                }
+                if (end < start) {
+                    throw new IllegalArgumentException(
+                            "pages: inverted range '" + chunk + "'");
+                }
+                for (int i = start; i <= end; i++) out.add(i);
             }
-            if (chosen == null) {
-                throw new IllegalArgumentException(
-                        "no " + sourceHost + " links found on that page");
-            }
-        } else if (!ranked.isEmpty()) {
-            chosen = ranked.get(0).getKey();
-            chosenUrls = perHost.get(chosen);
         }
-
-        List<HostCount> sourcesJson = new ArrayList<>();
-        for (Map.Entry<String, Integer> e : ranked) {
-            sourcesJson.add(new HostCount(e.getKey(), e.getValue()));
+        if (out.isEmpty()) return List.of(1);
+        List<Integer> sorted = new ArrayList<>(out);
+        Collections.sort(sorted);
+        if (sorted.size() > MAX_PAGES_PER_DISCOVERY) {
+            throw new IllegalArgumentException(
+                    "pages: too many (" + sorted.size() + ", max "
+                            + MAX_PAGES_PER_DISCOVERY + ")");
         }
+        return Collections.unmodifiableList(sorted);
+    }
 
-        return new DiscoveryResult(
-                url,
-                chosen,
-                sourcesJson,
-                chosenUrls == null ? List.of() : new ArrayList<>(chosenUrls),
-                redirectsFound,
-                redirectsResolved);
+    /**
+     * Builds the per-page URL by appending {@code page=N}, or replacing
+     * any existing {@code page=...} value. Treats the input as a raw
+     * URL string — does not decode {@code [bracket]} query keys (which
+     * ixxx.com uses for filter parameters).
+     */
+    static String buildPageUrl(String baseUrl, int pageNum) {
+        int q = baseUrl.indexOf('?');
+        if (q < 0) {
+            return baseUrl + "?page=" + pageNum;
+        }
+        String pathPart = baseUrl.substring(0, q);
+        String existingQs = baseUrl.substring(q + 1);
+        StringBuilder rebuilt = new StringBuilder();
+        boolean first = true;
+        for (String param : existingQs.split("&")) {
+            if (param.isEmpty()) continue;
+            int eq = param.indexOf('=');
+            String key = eq < 0 ? param : param.substring(0, eq);
+            if ("page".equals(key)) continue; // drop existing page=N
+            if (!first) rebuilt.append('&');
+            rebuilt.append(param);
+            first = false;
+        }
+        if (!first) rebuilt.append('&');
+        rebuilt.append("page=").append(pageNum);
+        return pathPart + "?" + rebuilt;
     }
 
     private void bucket(Map<String, Set<String>> perHost, String finalUrl, boolean videosOnly) {
@@ -327,11 +512,39 @@ public class IxxxDiscoveryService {
 
     public record HostCount(String host, int count) {}
 
+    /**
+     * Per-page breakdown of one discovery request. Returned in
+     * {@link DiscoveryResult#perPage()} so the UI can render a line
+     * per page (e.g. "page 2 → 53 links, page 3 → 0 links") instead
+     * of an opaque single count.
+     */
+    public record PageOutcome(
+            int page,
+            String requestedUrl,
+            int redirectsFound,
+            int redirectsResolved,
+            Map<String, Set<String>> buckets,
+            String error) {
+
+        /** Factory for a failed scrape — used when {@link #extractPage} throws. */
+        public static PageOutcome failed(int page, String url, String error) {
+            return new PageOutcome(page, url, 0, 0, Map.of(), error);
+        }
+
+        /** Total URLs extracted from this page across all source hosts. */
+        public int totalUrls() {
+            return buckets().values().stream().mapToInt(Set::size).sum();
+        }
+    }
+
     public record DiscoveryResult(
             String sourceUrl,
             String detectedSource,
             List<HostCount> sources,
             List<String> urls,
             int redirectsFound,
-            int redirectsResolved) {}
+            int redirectsResolved,
+            List<Integer> requestedPages,
+            int pagesFetched,
+            List<PageOutcome> perPage) {}
 }

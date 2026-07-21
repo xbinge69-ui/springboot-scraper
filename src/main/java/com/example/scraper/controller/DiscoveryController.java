@@ -2,6 +2,7 @@ package com.example.scraper.controller;
 
 import com.example.scraper.service.IxxxDiscoveryService;
 import com.example.scraper.service.IxxxDiscoveryService.DiscoveryResult;
+import com.example.scraper.service.IxxxDiscoveryService.PageOutcome;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -9,7 +10,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseBody;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -19,7 +22,9 @@ import java.util.Map;
  *
  * <p>Source site is auto-detected from the page — see
  * {@link IxxxDiscoveryService} for the bucketing logic. Callers may
- * pin a specific source with the {@code sourceHost} field.
+ * pin a specific source with the {@code sourceHost} field, and may
+ * extend the scrape across pagination with the {@code pages} field
+ * (e.g. {@code "2,3,5"}, {@code "2-5"}, {@code "1-3,5,7-9"}).
  */
 @Controller
 @RequestMapping("/api/discovery")
@@ -45,9 +50,14 @@ public class DiscoveryController {
         if (sh instanceof String && !((String) sh).isBlank()) {
             sourceHost = ((String) sh).trim();
         }
+        String pages = null;
+        Object p = body.get("pages");
+        if (p instanceof String && !((String) p).isBlank()) {
+            pages = ((String) p).trim();
+        }
 
         try {
-            DiscoveryResult result = ixxxService.discover(url, sourceHost, videosOnly);
+            DiscoveryResult result = ixxxService.discover(url, sourceHost, videosOnly, pages);
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("sourceUrl", result.sourceUrl());
             resp.put("detectedSource", result.detectedSource());
@@ -60,6 +70,15 @@ public class DiscoveryController {
             if (sourceHost != null) {
                 resp.put("requestedSource", sourceHost);
             }
+            if (pages != null) {
+                // Echo what the service parsed so the UI can confirm its
+                // input was understood. requestedPages is always present
+                // (single-element list for the legacy single-page path);
+                // pagesFetched is the subset that didn't fail.
+                resp.put("requestedPages", result.requestedPages());
+                resp.put("pagesFetched", result.pagesFetched());
+                resp.put("perPage", serializePerPage(result.perPage()));
+            }
             return ResponseEntity.ok(resp);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(err(e.getMessage()));
@@ -68,6 +87,28 @@ public class DiscoveryController {
             body2.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
             return ResponseEntity.status(502).body(body2);
         }
+    }
+
+    /**
+     * Flattens {@link PageOutcome} into a JSON-safe shape for the UI.
+     * The buckets map is omitted — the aggregate is already exposed via
+     * {@code result.sources()} / {@code result.urls()} — and we keep
+     * only the counts and any error per page.
+     */
+    private static List<Map<String, Object>> serializePerPage(List<PageOutcome> perPage) {
+        if (perPage == null || perPage.isEmpty()) return List.of();
+        List<Map<String, Object>> out = new ArrayList<>(perPage.size());
+        for (PageOutcome p : perPage) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("page", p.page());
+            m.put("requestedUrl", p.requestedUrl());
+            m.put("redirectsFound", p.redirectsFound());
+            m.put("redirectsResolved", p.redirectsResolved());
+            m.put("totalUrls", p.totalUrls());
+            if (p.error() != null) m.put("error", p.error());
+            out.add(m);
+        }
+        return out;
     }
 
     private static Map<String, Object> err(String message) {
