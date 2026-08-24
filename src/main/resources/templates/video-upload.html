@@ -57,6 +57,15 @@
     <label for="actressId">Actress ID (optional)</label>
     <input id="actressId" name="actressId" type="text"/>
 
+    <fieldset style="margin-top:1rem; padding:.7rem; border:1px solid #ccc; border-radius:6px;">
+        <legend style="padding:0 .4rem; font-weight:600;">📡 Bunny.net CDN — upload mirrors</legend>
+        <p class="hint" style="margin:.2rem 0 .6rem;">Pick which Bunny pull zones to upload to. <strong>Defaults to all</strong>.</p>
+        <div id="cdnZones" style="display:flex; gap:.7rem; flex-wrap:wrap;">
+            <span class="hint">Loading configured zones…</span>
+        </div>
+        <p id="cdnSummary" class="hint" style="margin:.5rem 0 0; font-family:monospace; font-size:.75rem;"></p>
+    </fieldset>
+
     <button id="submitBtn" type="submit">Upload & Create Catalog Entry</button>
 </form>
 
@@ -80,6 +89,80 @@
     const progressFill = document.getElementById('progressFill');
     const progressText = document.getElementById('progressText');
     const submitBtn = document.getElementById('submitBtn');
+    const cdnZonesEl = document.getElementById('cdnZones');
+    const cdnSummary = document.getElementById('cdnSummary');
+
+    // ---- Bunny CDN zones — dynamic checkboxes, all checked by default ----
+    async function refreshCdnZones() {
+        cdnZonesEl.innerHTML = '<span class="hint">Loading configured zones…</span>';
+        cdnSummary.textContent = '';
+        try {
+            const r = await fetch('/api/bunny/zones');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            cdnZonesEl.innerHTML = '';
+            if (!d.enabled || !Array.isArray(d.keys) || d.keys.length === 0) {
+                // Hide the entire fieldset when no zones are configured
+                // so a dev-mode deployment without Bunny doesn't show
+                // useless controls.
+                const fs = cdnZonesEl.closest('fieldset');
+                if (fs) fs.style.display = 'none';
+                return;
+            }
+            for (const key of d.keys) {
+                const id = 'cdnZone_' + key.replace(/[^a-zA-Z0-9_]/g, '_');
+                const wrap = document.createElement('label');
+                wrap.htmlFor = id;
+                wrap.style.cssText = 'display:flex; align-items:center; gap:.35rem; '
+                    + 'font-weight:600; cursor:pointer; margin:0; padding:.3rem .5rem; '
+                    + 'border:1px solid #ccc; border-radius:4px; background:#fafafa;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = id;
+                cb.value = key;
+                cb.checked = true; // default ON — "both by default"
+                cb.dataset.zoneKey = key;
+                cb.addEventListener('change', updateCdnSummary);
+                wrap.appendChild(cb);
+                wrap.appendChild(document.createTextNode(' ' + key));
+                cdnZonesEl.appendChild(wrap);
+            }
+            cdnSummary.textContent = 'configured: ' + (d.summary || d.keys.join(', '));
+            updateCdnSummary();
+        } catch (err) {
+            cdnZonesEl.innerHTML = '<span class="hint">⚠️ could not load zones: '
+                + (err.message || err) + '</span>';
+        }
+    }
+
+    function updateCdnSummary() {
+        const cbs = cdnZonesEl.querySelectorAll('input[type="checkbox"]');
+        if (!cbs.length) return;
+        const total = cbs.length;
+        const checked = Array.from(cbs).filter(c => c.checked).map(c => c.value);
+        if (checked.length === 0) {
+            cdnSummary.textContent = '⚠️ none selected — uploads would be skipped.';
+            cdnSummary.style.color = '#c00';
+        } else if (checked.length === total) {
+            cdnSummary.textContent = '✅ all ' + total + ' zone(s) selected (mirror to all).';
+            cdnSummary.style.color = '#090';
+        } else {
+            cdnSummary.textContent = '✅ ' + checked.length + '/' + total + ' selected: ' + checked.join(', ');
+            cdnSummary.style.color = '#090';
+        }
+    }
+
+    function collectBunnyZonesCsv() {
+        const out = [];
+        for (const cb of cdnZonesEl.querySelectorAll('input[type="checkbox"]')) {
+            if (cb.checked) out.push(cb.value);
+        }
+        // Server treats null/blank as "upload to all configured zones",
+        // which matches the default-everywhere intent.
+        return out.length > 0 ? out.join(',') : '';
+    }
+
+    refreshCdnZones();
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -98,6 +181,7 @@
         formData.append('tags', form.tags.value);
         formData.append('unknownActressName', form.unknownActressName.value);
         formData.append('actressId', form.actressId.value);
+        formData.append('bunnyZones', collectBunnyZonesCsv());
 
         try {
             progressFill.style.width = '30%';

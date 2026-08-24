@@ -184,6 +184,18 @@
                 </details>
             </div>
 
+            <div id="cdnPanel" style="margin-top:1rem; padding:.8rem; border:1px solid #334155; border-radius:6px; background:#0b1220;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                    <strong>📡 Bunny.net CDN — upload mirrors</strong>
+                    <button type="button" id="cdnRefreshBtn" class="btn secondary" style="font-size:.75rem; padding:.2rem .6rem;">↻ Refresh</button>
+                </div>
+                <p class="hint" style="margin:.4rem 0;">Pick which Bunny pull zones to mirror this video to. <strong>Defaults to all</strong>.</p>
+                <div id="cdnZones" style="display:flex; gap:1rem; flex-wrap:wrap; margin-top:.4rem;">
+                    <span class="hint">Loading configured zones…</span>
+                </div>
+                <p id="cdnSummary" class="hint" style="margin:.4rem 0 0; font-family:monospace; font-size:.75rem; color:var(--muted);"></p>
+            </div>
+
             <button id="runBtn" class="btn success" type="submit">🚀 Run Pipeline</button>
         </form>
 
@@ -241,6 +253,10 @@
     const ffmpegSummary  = document.getElementById('ffmpegSummary');
     const ffmpegDetails  = document.getElementById('ffmpegDetails');
     const ffmpegRefresh  = document.getElementById('ffmpegRefreshBtn');
+    const cdnPanel       = document.getElementById('cdnPanel');
+    const cdnZonesEl     = document.getElementById('cdnZones');
+    const cdnSummary     = document.getElementById('cdnSummary');
+    const cdnRefresh     = document.getElementById('cdnRefreshBtn');
 
     const progressWrap = document.getElementById('progressWrap');
     const progressFill = document.getElementById('progressFill');
@@ -322,6 +338,82 @@
             llmStatus.textContent = 'Could not reach /api/llm/status: ' + err.message;
         }
     })();
+
+    // ---- Bunny CDN zones — dynamic checkboxes, all checked by default ----
+    async function refreshCdnZones() {
+        cdnZonesEl.innerHTML = '<span class="hint">Loading configured zones…</span>';
+        cdnSummary.textContent = '';
+        try {
+            const r = await fetch('/api/bunny/zones');
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            cdnZonesEl.innerHTML = '';
+            if (!d.enabled || !Array.isArray(d.keys) || d.keys.length === 0) {
+                cdnPanel.style.display = 'none';
+                return;
+            }
+            cdnPanel.style.display = 'block';
+            for (const key of d.keys) {
+                const id = 'cdnZone_' + key.replace(/[^a-zA-Z0-9_]/g, '_');
+                const wrap = document.createElement('label');
+                wrap.htmlFor = id;
+                wrap.style.cssText = 'display:flex; align-items:center; gap:.4rem; '
+                    + 'font-weight:600; cursor:pointer; margin:0; padding:.35rem .6rem; '
+                    + 'border:1px solid #334155; border-radius:6px; background:#0f172a;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = id;
+                cb.value = key;
+                cb.checked = true; // default ON — "both by default"
+                cb.dataset.zoneKey = key;
+                cb.addEventListener('change', updateCdnSummary);
+                wrap.appendChild(cb);
+                wrap.appendChild(document.createTextNode(' ' + key));
+                cdnZonesEl.appendChild(wrap);
+            }
+            cdnSummary.textContent = 'configured: ' + (d.summary || d.keys.join(', '));
+            updateCdnSummary();
+        } catch (err) {
+            cdnZonesEl.innerHTML = '<span class="hint">⚠️ could not load zones: '
+                + (err.message || err) + '</span>';
+        }
+    }
+
+    function updateCdnSummary() {
+        const cbs = cdnZonesEl.querySelectorAll('input[type="checkbox"]');
+        if (!cbs.length) return;
+        const total = cbs.length;
+        const checked = Array.from(cbs).filter(c => c.checked).map(c => c.value);
+        let live = document.getElementById('cdnSelectionStatus');
+        if (!live) {
+            live = document.createElement('p');
+            live.id = 'cdnSelectionStatus';
+            live.className = 'hint';
+            live.style.cssText = 'margin:.4rem 0 0; font-weight:600;';
+            cdnPanel.appendChild(live);
+        }
+        if (checked.length === 0) {
+            live.textContent = '⚠️ none selected — uploads would be skipped.';
+            live.style.color = '#fecaca';
+        } else if (checked.length === total) {
+            live.textContent = '✅ all ' + total + ' zone(s) selected (mirror to all).';
+            live.style.color = '#bbf7d0';
+        } else {
+            live.textContent = '✅ ' + checked.length + '/' + total + ' selected: ' + checked.join(', ');
+            live.style.color = '#bbf7d0';
+        }
+    }
+
+    function collectBunnyZones() {
+        const out = [];
+        for (const cb of cdnZonesEl.querySelectorAll('input[type="checkbox"]')) {
+            if (cb.checked) out.push(cb.value);
+        }
+        return out.length > 0 ? out : null;
+    }
+
+    if (cdnRefresh) cdnRefresh.addEventListener('click', refreshCdnZones);
+    refreshCdnZones();
 
     // ---- Step 0: ffmpeg / GPU probe ----
     async function refreshFfmpegStatus() {
@@ -436,7 +528,8 @@
             actressId: form.actressId.value,
             views: form.views.value ? Number(form.views.value) : 0,
             useMinimax: !!useMinimax.checked,
-            skipLlm: !!skipLlm.checked
+            skipLlm: !!skipLlm.checked,
+            bunnyZones: collectBunnyZones()
         };
 
         try {

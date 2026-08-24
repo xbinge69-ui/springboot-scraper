@@ -74,7 +74,8 @@ public class VideoIngestionPipelineService {
                 Boolean.TRUE.equals(request.getUseMinimax()),
                 Boolean.TRUE.equals(request.getSkipLlm()),
                 job,
-                previewsDir);
+                previewsDir,
+                request.getBunnyZones());
     }
 
     private void validateRequest(PipelineRequest request) {

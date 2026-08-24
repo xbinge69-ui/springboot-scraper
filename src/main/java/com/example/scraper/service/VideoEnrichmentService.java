@@ -148,7 +148,7 @@ public class VideoEnrichmentService {
      *                   MiniMax's hosted API instead of local Ollama.
      */
     public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata, boolean useMinimax) throws IOException {
-        return enrich(source, metadata, useMinimax, false, null, null);
+        return enrich(source, metadata, useMinimax, false, null, null, null);
     }
 
     /**
@@ -160,7 +160,7 @@ public class VideoEnrichmentService {
      */
     public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
                                   boolean useMinimax, boolean skipLlm) throws IOException {
-        return enrich(source, metadata, useMinimax, skipLlm, null, null);
+        return enrich(source, metadata, useMinimax, skipLlm, null, null, null);
     }
 
     /**
@@ -176,7 +176,7 @@ public class VideoEnrichmentService {
                                   boolean useMinimax,
                                   com.example.scraper.model.PipelineJob job,
                                   Path previewsDir) throws IOException {
-        return enrich(source, metadata, useMinimax, false, job, previewsDir);
+        return enrich(source, metadata, useMinimax, false, job, previewsDir, null);
     }
 
     /**
@@ -185,11 +185,19 @@ public class VideoEnrichmentService {
      * with the user's metadata as-is. Skipping saves the 2-10s LLM
      * round-trip per video (and avoids the "LLM unavailable" warning
      * when the local model isn't pulled).
+     *
+     * @param bunnyZones which Bunny.net pull zones to mirror the
+     *                   upload to. {@code null} → upload to every
+     *                   configured zone (default batch behaviour:
+     *                   primary + all mirrors). Pass an explicit
+     *                   subset to restrict — see
+     *                   {@link com.example.scraper.service.BunnyAssetService#uploadBytesMulti}.
      */
     public PipelineOutcome enrich(EnrichmentSource source, EnrichmentMetadata metadata,
                                   boolean useMinimax, boolean skipLlm,
                                   com.example.scraper.model.PipelineJob job,
-                                  Path previewsDir) throws IOException {
+                                  Path previewsDir,
+                                  java.util.Collection<String> bunnyZones) throws IOException {
         if (job != null) job.markRunning("Resolving source");
         List<String> warnings = new ArrayList<>();
         Path tempDir = Files.createTempDirectory("scraper-enrich-" + UUID.randomUUID());
@@ -291,24 +299,68 @@ public class VideoEnrichmentService {
             stats.setPreviewClipsTotalBytes(counted > 0 ? total : -1L);
         }
 
-        // ----- Steps 4-5: upload all 3 derivatives to Bunny (the only CDN) -----
+        // ----- Steps 4-5: upload all 3 derivatives to every selected Bunny zone -----
         String slugHint = Slugify.slugify(metadata.titleOrFallback());
         String uuid = BunnyAssetService.newRequestUuid();
         String folder = bunny.getFolder();
-        String thumbnailUrl, previewUrl, compressedUrl;
+        // `bunnyZones` may be null → upload to all configured zones.
+        // We snapshot it now so the portrait fetch below uses the
+        // same selection (avoids the user un-checking a box mid-run).
+        java.util.Collection<String> selectedZones = bunnyZones;
+        // Map zone-key → URL for each asset type. LinkedHashMap so the
+        // ordering (primary first, mirrors next) survives into JSON.
+        java.util.LinkedHashMap<String, String> thumbnailUrls = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, String> previewUrls    = new java.util.LinkedHashMap<>();
+        java.util.LinkedHashMap<String, String> compressedUrls = new java.util.LinkedHashMap<>();
         try (EnrichmentTempFiles ignored = new EnrichmentTempFiles(
                 inputPath, derivatives.thumbnailPath(), derivatives.previewPath(), derivatives.compressedPath())) {
 
-            thumbnailUrl  = bunny.uploadBytes(derivatives.thumbnailPath(),
-                    folder + "/" + slugHint + "-" + uuid + ".thumbnail.jpg",  "image/jpeg");
-            previewUrl    = bunny.uploadBytes(derivatives.previewPath(),
-                    folder + "/" + slugHint + "-" + uuid + ".preview.mp4",    "video/mp4");
-            compressedUrl = bunny.uploadBytes(derivatives.compressedPath(),
-                    folder + "/" + slugHint + "-" + uuid + ".compressed.mp4", "video/mp4");
+            thumbnailUrls.putAll(bunny.uploadBytesMulti(derivatives.thumbnailPath(),
+                    folder + "/" + slugHint + "-" + uuid + ".thumbnail.jpg",  "image/jpeg", selectedZones));
+            previewUrls.putAll(bunny.uploadBytesMulti(derivatives.previewPath(),
+                    folder + "/" + slugHint + "-" + uuid + ".preview.mp4",    "video/mp4", selectedZones));
+            compressedUrls.putAll(bunny.uploadBytesMulti(derivatives.compressedPath(),
+                    folder + "/" + slugHint + "-" + uuid + ".compressed.mp4", "video/mp4", selectedZones));
         } catch (Exception e) {
             deleteRecursively(tempDir);
             throw new IOException("bunny upload failed: " + e.getMessage(), e);
         }
+
+        // Fail-soft reporting: per-zone upload failures are already
+        // logged by BunnyAssetService at WARN level (so ops sees them
+        // in the run console). Surface them to the user too — the
+        // returned map only contains successful zones, so any zone
+        // that was selected but is missing here failed (auth / 5xx /
+        // network). Compute the diff against the configured set so we
+        // can attach a per-zone warning. Bail out hard only when
+        // EVERY selected zone failed — a fully-empty result would mean
+        // the entry has no CDN copy at all.
+        java.util.Set<String> missingCompressedZones = new java.util.LinkedHashSet<>();
+        if (selectedZones != null) {
+            missingCompressedZones.addAll(selectedZones);
+        } else if (bunny.getZoneKeys() != null) {
+            missingCompressedZones.addAll(bunny.getZoneKeys());
+        }
+        missingCompressedZones.removeAll(compressedUrls.keySet());
+        for (String missing : missingCompressedZones) {
+            warnings.add("Bunny upload to zone '" + missing + "' failed (other zones were used — see server log for details)");
+        }
+        if (compressedUrls.isEmpty()) {
+            deleteRecursively(tempDir);
+            throw new IOException("bunny upload failed: no configured Bunny zone accepted the upload "
+                    + "(see server log for per-zone HTTP errors)");
+        }
+
+        // Canonical URLs: primary zone for embed/preview/thumbnail,
+        // second zone for the backup. When only one zone was uploaded
+        // (or only one is configured), backupEmbedUrl mirrors embedUrl
+        // — keeps the existing single-CDN contract intact.
+        String thumbnailUrl  = BunnyAssetService.firstUrl(thumbnailUrls);
+        String previewUrl    = BunnyAssetService.firstUrl(previewUrls);
+        String compressedUrl = BunnyAssetService.firstUrl(compressedUrls);
+        String backupEmbedUrl = compressedUrls.size() >= 2
+                ? new ArrayList<>(compressedUrls.values()).get(1)
+                : compressedUrl;
 
         // ----- Step 6 (optional): fetch the actress portrait from the
         // source page and re-host it on Bunny. We do this AFTER the
@@ -323,19 +375,13 @@ public class VideoEnrichmentService {
         if (metadata.actressAvatarUrl() != null && !metadata.actressAvatarUrl().isBlank()) {
             try {
                 portraitUrl = fetchAndUploadActressPortrait(
-                        metadata.actressAvatarUrl(), tempDir, slugHint, uuid, folder);
+                        metadata.actressAvatarUrl(), tempDir, slugHint, uuid, folder, selectedZones);
             } catch (Exception e) {
                 warnings.add("Actress portrait fetch/upload failed: " + e.getMessage());
             }
         }
 
         if (job != null) job.updateProgress(80, "Running LLM enrichment");
-
-        // No second CDN — backupEmbedUrl mirrors embedUrl (the compressed
-        // Bunny URL) so the field stays populated for any downstream consumer
-        // that reads it. The field is still @JsonInclude(NON_NULL) on the
-        // model so it's trivial to remove later.
-        String backupEmbedUrl = compressedUrl;
 
         // ----- Step 7: LLM Topical Authority pass (skipped when skipLlm=true) -----
         TopicalAuthorityResult llm;
@@ -382,6 +428,12 @@ public class VideoEnrichmentService {
         entry.setActressPortraitKey(portraitUrl);
         entry.setViews(llm.views());
         entry.setStats(stats);
+        // List of Bunny zone keys this entry was mirrored to — primary
+        // first, then any configured mirrors. Downstream consumers
+        // (project-b / the public site) read this to decide which CDN
+        // to play from. The list matches the actual uploads that ran
+        // (i.e. honours the bunnyZones override when one was supplied).
+        entry.setCdnZoneKeys(new ArrayList<>(compressedUrls.keySet()));
 
         VideoCatalogEntry saved;
         try {
@@ -511,7 +563,8 @@ public class VideoEnrichmentService {
                                                  Path tempDir,
                                                  String slugHint,
                                                  String uuid,
-                                                 String folder) throws IOException {
+                                                 String folder,
+                                                 java.util.Collection<String> bunnyZones) throws IOException {
         URI uri;
         try {
             uri = URI.create(remoteUrl);
@@ -559,7 +612,13 @@ public class VideoEnrichmentService {
             conn.disconnect();
         }
         try {
-            return bunny.uploadBytes(tempFile, objectKey, bunnyContentType);
+            // Replicate the portrait to every selected Bunny zone so
+            // the thumbnail/preview/compressed URLs and the portrait
+            // URL are always co-located. Falls back to the primary
+            // zone's URL when bunnyZones is null.
+            Map<String, String> urls = bunny.uploadBytesMulti(
+                    tempFile, objectKey, bunnyContentType, bunnyZones);
+            return BunnyAssetService.firstUrl(urls);
         } finally {
             try { Files.deleteIfExists(tempFile); } catch (IOException ignored) {}
         }

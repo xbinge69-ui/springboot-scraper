@@ -114,11 +114,24 @@ class VideoEnrichmentServiceTest {
 
         BunnyAssetService bunny = mock(BunnyAssetService.class);
         when(bunny.getFolder()).thenReturn("videos");
+        // Orchestrator consults getZoneKeys() to compute the
+        // fail-soft "missing zone" warnings. Stub it so the
+        // per-zone comparison works correctly.
+        when(bunny.getZoneKeys()).thenReturn(java.util.List.of("spankycouples"));
         AtomicInteger uploadCount = new AtomicInteger();
-        when(bunny.uploadBytes(any(Path.class), anyString(), anyString())).thenAnswer(inv -> {
+        // Stub the multi-zone variant used by the orchestrator. Return
+        // a single-zone map so the test mirrors the legacy single-CDN
+        // behaviour: backupEmbedUrl == embedUrl, cdnZoneKeys has one
+        // entry. A separate test exercises the real 2-zone path.
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any())).thenAnswer(inv -> {
             uploadCount.incrementAndGet();
-            return "https://cdn.example/" + inv.getArgument(1);
+            // selectedKeys is the 4th arg (Collection<String>). null
+            // means "upload to every configured zone" — we simulate
+            // the result with one zone for this test.
+            return java.util.Map.of("spankycouples", "https://cdn.example/" + inv.getArgument(1));
         });
+        when(bunny.uploadBytesMulti(any(byte[].class), anyString(), anyString(), any())).thenAnswer(inv ->
+                java.util.Map.of("spankycouples", "https://cdn.example/" + inv.getArgument(1)));
 
         VideoEnrichmentService service = new VideoEnrichmentService(
                 ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
@@ -156,8 +169,11 @@ class VideoEnrichmentServiceTest {
         assertThat(entry.getPreviewUrl()).endsWith(".preview.mp4");
         assertThat(entry.getEmbedUrl()).endsWith(".compressed.mp4");
         assertThat(entry.getBackupEmbedUrl())
-                .as("backupEmbedUrl mirrors embedUrl since there's no second CDN")
+                .as("backupEmbedUrl mirrors embedUrl since only one CDN zone was returned")
                 .isEqualTo(entry.getEmbedUrl());
+        assertThat(entry.getCdnZoneKeys())
+                .as("entry records which Bunny zones the upload reached")
+                .containsExactly("spankycouples");
         assertThat(entry.getUnknownActressName()).isEqualTo("Anonymous Couple");
         assertThat(entry.getPublishedAt()).isNotBlank();
 
@@ -170,6 +186,9 @@ class VideoEnrichmentServiceTest {
         List<VideoCatalogEntry> saved = catalog.readAll();
         assertThat(saved).hasSize(1);
         assertThat(saved.get(0).getId()).isEqualTo("v1");
+        assertThat(saved.get(0).getCdnZoneKeys())
+                .as("persisted entry mirrors the multi-zone list")
+                .containsExactly("spankycouples");
 
         // ---- cleanup: no scraper-enrich-* dirs leaked (the catalog file is
         // intentionally in tempDir and stays) ----
@@ -200,8 +219,11 @@ class VideoEnrichmentServiceTest {
 
         BunnyAssetService bunny = mock(BunnyAssetService.class);
         when(bunny.getFolder()).thenReturn("videos");
-        when(bunny.uploadBytes(any(Path.class), anyString(), anyString())).thenAnswer(inv ->
-                "https://cdn.example/" + inv.getArgument(1));
+        when(bunny.getZoneKeys()).thenReturn(java.util.List.of("spankycouples"));
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any())).thenAnswer(inv ->
+                java.util.Map.of("spankycouples", "https://cdn.example/" + inv.getArgument(1)));
+        when(bunny.uploadBytesMulti(any(byte[].class), anyString(), anyString(), any())).thenAnswer(inv ->
+                java.util.Map.of("spankycouples", "https://cdn.example/" + inv.getArgument(1)));
 
         VideoEnrichmentService service = new VideoEnrichmentService(
                 ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
@@ -229,6 +251,159 @@ class VideoEnrichmentServiceTest {
         assertThat(outcome.getWarnings()).anyMatch(w -> w.contains("Ollama"));
     }
 
+    /**
+     * Multi-zone path: the orchestrator asks Bunny for two zones
+     * (spankycouples + youjav) and gets back a per-zone URL map. The
+     * catalog entry must record BOTH URLs:
+     * <ul>
+     *   <li>{@code embedUrl} → primary (spankycouples)</li>
+     *   <li>{@code backupEmbedUrl} → second (youjav)</li>
+     *   <li>{@code cdnZoneKeys} → the ordered list of zone keys</li>
+     * </ul>
+     * Downstream project-b uses these fields to pick which CDN to play
+     * from and which to use as failover.
+     */
+    @Test
+    void enrich_multiZone_recordsPerZoneUrlsAndBackupEmbed() throws Exception {
+        Path catalogFile = tempDir.resolve("videos-multi-zone.json");
+        VideoCatalogService catalog = new VideoCatalogService(new ObjectMapper());
+        setField(catalog, "videosFilePath", catalogFile.toString());
+
+        FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
+                new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        "See more SpankyCouples.com", 18,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
+
+        OllamaService ollama = mock(OllamaService.class);
+        when(ollama.generate(anyString(), any())).thenReturn("{}");
+
+        BunnyAssetService bunny = mock(BunnyAssetService.class);
+        when(bunny.getFolder()).thenReturn("videos");
+        // Multi-zone stub: return a different URL per zone so we can
+        // verify the orchestrator routes the right URL to embedUrl vs
+        // backupEmbedUrl. Order is canonical (primary first).
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            String objectPath = inv.getArgument(1);
+            java.util.LinkedHashMap<String, String> urls = new java.util.LinkedHashMap<>();
+            urls.put("spankycouples", "https://spankycouples.example/" + objectPath);
+            urls.put("youjav",       "https://youjav.example/"       + objectPath);
+            return urls;
+        });
+        when(bunny.uploadBytesMulti(any(byte[].class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            String objectPath = inv.getArgument(1);
+            java.util.LinkedHashMap<String, String> urls = new java.util.LinkedHashMap<>();
+            urls.put("spankycouples", "https://spankycouples.example/" + objectPath);
+            urls.put("youjav",       "https://youjav.example/"       + objectPath);
+            return urls;
+        });
+
+        VideoEnrichmentService service = new VideoEnrichmentService(
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
+                120, 50_000_000L, 5, 30, 60, "json", 0.2);
+
+        EnrichmentMetadata meta = new EnrichmentMetadata(
+                "Multi Zone Test", null, "Amateur", List.of("test"),
+                null, null, null);
+
+        Path input = fixtureAsInput();
+        PipelineOutcome outcome = service.enrich(
+                new EnrichmentSource.LocalFile(input, Files.size(input)),
+                meta, false);
+
+        VideoCatalogEntry entry = outcome.getEntry();
+        // Primary zone → embedUrl. The thumbnail/preview/portrait all
+        // point at the primary too (canonical fields, single URL each).
+        assertThat(entry.getEmbedUrl())
+                .as("embedUrl is the primary zone's URL")
+                .startsWith("https://spankycouples.example/")
+                .endsWith(".compressed.mp4");
+        assertThat(entry.getThumbnailKey()).startsWith("https://spankycouples.example/");
+        assertThat(entry.getPreviewUrl()).startsWith("https://spankycouples.example/");
+        // Second zone → backupEmbedUrl (new behaviour: no longer mirrors embedUrl).
+        assertThat(entry.getBackupEmbedUrl())
+                .as("backupEmbedUrl is the SECOND zone's URL when 2+ zones were uploaded")
+                .startsWith("https://youjav.example/")
+                .endsWith(".compressed.mp4")
+                .isNotEqualTo(entry.getEmbedUrl());
+        // The recorded zone-key list is what project-b consumes to know
+        // which CDNs hold this video. Order = canonical (primary first).
+        assertThat(entry.getCdnZoneKeys())
+                .as("cdnZoneKeys is the ordered list of zones that got the upload")
+                .containsExactly("spankycouples", "youjav");
+    }
+
+    /**
+     * Selection override: caller passes a non-null bunnyZones set, and
+     * the orchestrator must forward it verbatim to
+     * {@link BunnyAssetService#uploadBytesMulti} so only the requested
+     * zone is uploaded to. The catalog entry then records only the
+     * chosen zone, not the full set.
+     */
+    @Test
+    void enrich_bunnyZonesOverride_isForwardedToUploader() throws Exception {
+        Path catalogFile = tempDir.resolve("videos-zone-override.json");
+        VideoCatalogService catalog = new VideoCatalogService(new ObjectMapper());
+        setField(catalog, "videosFilePath", catalogFile.toString());
+
+        FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
+                new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        "See more SpankyCouples.com", 18,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
+
+        OllamaService ollama = mock(OllamaService.class);
+        when(ollama.generate(anyString(), any())).thenReturn("{}");
+
+        // Capture the selectedKeys arg passed to uploadBytesMulti.
+        // The orchestrator must forward the caller's override unchanged.
+        java.util.concurrent.atomic.AtomicReference<java.util.Collection<String>> seenSelection =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        BunnyAssetService bunny = mock(BunnyAssetService.class);
+        when(bunny.getFolder()).thenReturn("videos");
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            @SuppressWarnings("unchecked")
+            java.util.Collection<String> sel = inv.getArgument(3);
+            seenSelection.set(sel);
+            // Simulate the server: only the requested zone was uploaded.
+            return java.util.Map.of("youjav", "https://youjav.example/" + inv.getArgument(1));
+        });
+
+        VideoEnrichmentService service = new VideoEnrichmentService(
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
+                120, 50_000_000L, 5, 30, 60, "json", 0.2);
+
+        EnrichmentMetadata meta = new EnrichmentMetadata(
+                "Override Test", null, "Amateur", List.of("test"),
+                null, null, null);
+
+        Path input = fixtureAsInput();
+        java.util.Set<String> override = java.util.Set.of("youjav");
+        service.enrich(
+                new EnrichmentSource.LocalFile(input, Files.size(input)),
+                meta, false, false, null, null, override);
+
+        // Selection forwarded verbatim.
+        assertThat(seenSelection.get())
+                .as("orchestrator must forward the bunnyZones override to the uploader")
+                .containsExactly("youjav");
+
+        List<VideoCatalogEntry> saved = catalog.readAll();
+        assertThat(saved).hasSize(1);
+        assertThat(saved.get(0).getCdnZoneKeys())
+                .as("only the overridden zone is persisted on the entry")
+                .containsExactly("youjav");
+        assertThat(saved.get(0).getEmbedUrl()).startsWith("https://youjav.example/");
+        // Single zone selected → backupEmbedUrl mirrors embedUrl (no failover URL).
+        assertThat(saved.get(0).getBackupEmbedUrl()).isEqualTo(saved.get(0).getEmbedUrl());
+    }
+
     @Test
     void enrich_bunnyFailure_cleansUpLocalFiles() throws Exception {
         Path catalogFile = tempDir.resolve("videos-bunny-fail.json");
@@ -249,8 +424,16 @@ class VideoEnrichmentServiceTest {
 
         BunnyAssetService bunny = mock(BunnyAssetService.class);
         when(bunny.getFolder()).thenReturn("videos");
-        when(bunny.uploadBytes(any(Path.class), anyString(), anyString()))
-                .thenThrow(new IOException("Bunny unreachable"));
+        when(bunny.getZoneKeys()).thenReturn(java.util.List.of("spankycouples"));
+        // With fail-soft semantics, the upload itself doesn't throw —
+        // it returns an empty map when every zone fails. The
+        // orchestrator then sees the empty map and throws an
+        // IOException("no configured Bunny zone accepted the upload")
+        // so the caller still gets a clear failure.
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any()))
+                .thenReturn(java.util.Map.of());
+        when(bunny.uploadBytesMulti(any(byte[].class), anyString(), anyString(), any()))
+                .thenReturn(java.util.Map.of());
 
         VideoEnrichmentService service = new VideoEnrichmentService(
                 ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
@@ -270,6 +453,89 @@ class VideoEnrichmentServiceTest {
             for (var p : ds) leaked++;
             assertThat(leaked).as("orchestrator should delete its per-request temp dir").isEqualTo(0);
         }
+    }
+
+    /**
+     * Fail-soft path: two zones are configured, the multi-zone upload
+     * returns ONLY the primary (youjav rejected the upload — auth or
+     * 5xx, doesn't matter). The orchestrator must:
+     * <ul>
+     *   <li>still persist the entry with {@code cdnZoneKeys=["spankycouples"]}</li>
+     *   <li>set {@code embedUrl}/{@code backupEmbedUrl} to the
+     *       primary's URL (no second zone available)</li>
+     *   <li>attach a warning naming the failed zone so the user sees
+     *       which CDN is unreachable</li>
+     * </ul>
+     * Pre-fail-soft this test would have failed with an
+     * IOException("bunny upload failed: status 401 ...") on the
+     * first upload attempt — making the whole batch unusable when
+     * one mirror zone is misconfigured.
+     */
+    @Test
+    void enrich_oneZoneFails_othersSucceedAndWarningIsAttached() throws Exception {
+        Path catalogFile = tempDir.resolve("videos-fail-soft.json");
+        VideoCatalogService catalog = new VideoCatalogService(new ObjectMapper());
+        setField(catalog, "videosFilePath", catalogFile.toString());
+
+        FfmpegDerivativeService ffmpeg = new FfmpegDerivativeService(
+                new FfmpegProperties("ffmpeg", "ffprobe", 5, 0.20, 0.40, 1280, 720,
+                        28, "fast", 23, "medium", 2,
+                        "Spankycouples.com",
+                        18, 24, 0.85, "black@0.4", 6, 12,
+                        "See more SpankyCouples.com", 18,
+                        25, new double[]{0.05, 0.35, 0.50, 0.65, 0.95},
+                        true, "nvidia,intel,amd", "h264"));
+
+        OllamaService ollama = mock(OllamaService.class);
+        when(ollama.generate(anyString(), any())).thenReturn("{}");
+
+        BunnyAssetService bunny = mock(BunnyAssetService.class);
+        when(bunny.getFolder()).thenReturn("videos");
+        // Two zones are configured; only the primary one accepts the
+        // upload. This simulates youjav returning HTTP 401.
+        when(bunny.getZoneKeys()).thenReturn(java.util.List.of("spankycouples", "youjav"));
+        when(bunny.uploadBytesMulti(any(Path.class), anyString(), anyString(), any())).thenAnswer(inv -> {
+            String objectPath = inv.getArgument(1);
+            // Only spankycouples succeeds; youjav is missing from the
+            // returned map (matches the real "BunnyAssetService
+            // logged the failure and skipped" behaviour).
+            return java.util.Map.of("spankycouples", "https://spankycouples.example/" + objectPath);
+        });
+        when(bunny.uploadBytesMulti(any(byte[].class), anyString(), anyString(), any())).thenAnswer(inv ->
+                java.util.Map.of("spankycouples", "https://spankycouples.example/" + inv.getArgument(1)));
+
+        VideoEnrichmentService service = new VideoEnrichmentService(
+                ffmpeg, bunny, ollama, /*minimax*/ null, catalog,
+                120, 50_000_000L, 5, 30, 60, "json", 0.2);
+
+        EnrichmentMetadata meta = new EnrichmentMetadata(
+                "Fail Soft Test", null, "Amateur", List.of("test"),
+                null, null, null);
+
+        Path input = fixtureAsInput();
+        PipelineOutcome outcome = service.enrich(
+                new EnrichmentSource.LocalFile(input, Files.size(input)),
+                meta, false);
+
+        // Entry still got persisted — fail-soft means we don't lose
+        // the upload just because one zone was unhappy.
+        VideoCatalogEntry entry = outcome.getEntry();
+        assertThat(entry).as("entry persists even when one zone fails").isNotNull();
+        assertThat(entry.getCdnZoneKeys())
+                .as("cdnZoneKeys only contains the zone that actually accepted the upload")
+                .containsExactly("spankycouples");
+        assertThat(entry.getEmbedUrl())
+                .startsWith("https://spankycouples.example/")
+                .endsWith(".compressed.mp4");
+        // Only one zone in the map → backupEmbedUrl mirrors embedUrl
+        // (no second zone to point at).
+        assertThat(entry.getBackupEmbedUrl()).isEqualTo(entry.getEmbedUrl());
+
+        // The user must see WHY youjav is missing — surfaced via the
+        // warning list that the controller pipes into the response.
+        assertThat(outcome.getWarnings())
+                .as("warning names the failed zone so the user can investigate")
+                .anyMatch(w -> w.contains("youjav") && w.contains("failed"));
     }
 
     // ---- helpers ----

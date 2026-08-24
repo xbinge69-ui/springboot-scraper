@@ -58,6 +58,7 @@ public class ScraperController {
     private final GpuEncoderProbe gpuEncoderProbe;
     private final com.example.scraper.video.FfmpegProperties ffmpegProperties;
     private final ProcessedUrlHistory processedHistory;
+    private final com.example.scraper.service.BunnyAssetService bunnyAssetService;
     /**
      * Optional — present only if the auto-propagation feature is
      * enabled in {@code application.properties}. When null, the batch
@@ -77,6 +78,7 @@ public class ScraperController {
                              GpuEncoderProbe gpuEncoderProbe,
                              com.example.scraper.video.FfmpegProperties ffmpegProperties,
                              ProcessedUrlHistory processedHistory,
+                             com.example.scraper.service.BunnyAssetService bunnyAssetService,
                              org.springframework.beans.factory.ObjectProvider<AddVideoEntryPropagationService> addVideoEntryPropagationServiceProvider) {
         this.scraperService = scraperService;
         this.videoScraperService = videoScraperService;
@@ -89,6 +91,7 @@ public class ScraperController {
         this.gpuEncoderProbe = gpuEncoderProbe;
         this.ffmpegProperties = ffmpegProperties;
         this.processedHistory = processedHistory;
+        this.bunnyAssetService = bunnyAssetService;
         // ObjectProvider so the service is optional — no startup error
         // when app.add-video-entry.enabled=false (the bean is still
         // created by Spring, but isEnabled() returns false; the
@@ -497,6 +500,12 @@ public class ScraperController {
         }
         boolean useMinimax = Boolean.TRUE.equals(body.useMinimax());
         boolean skipLlm = Boolean.TRUE.equals(body.skipLlm());
+        // Defensive copy: the batch payload's set is reused for every
+        // URL, so we hand each PipelineRequest its own LinkedHashSet to
+        // avoid one entry's setter overwriting another's.
+        java.util.Set<String> batchBunnyZones = body.bunnyZones() == null
+                ? null
+                : new java.util.LinkedHashSet<>(body.bunnyZones());
         List<Map<String, Object>> results = new ArrayList<>();
         List<String> toAddToHistory = new ArrayList<>();
         // Successful VideoCatalogEntry objects, in the same order as
@@ -549,6 +558,7 @@ public class ScraperController {
                 req.setViews(0L);
                 req.setUseMinimax(useMinimax);
                 req.setSkipLlm(skipLlm);
+                req.setBunnyZones(batchBunnyZones);
                 // Step 3: run the pipeline
                 PipelineOutcome outcome = videoIngestionPipelineService.ingestFromPageUrl(req);
                 row.put("entry", outcome.getEntry());
@@ -612,6 +622,27 @@ public class ScraperController {
     }
 
     /**
+     * Lists the Bunny.net pull zones the server is configured to
+     * upload to. The batch / single-pipeline / direct-upload forms
+     * render one checkbox per returned key. Empty list means "Bunny
+     * is disabled" — the UI hides the CDN section in that case so the
+     * user doesn't see useless controls.
+     *
+     * <p>The order is canonical (primary first, mirrors next) so the
+     * JSON output and the server-side {@code embedUrl} assignment are
+     * always consistent.
+     */
+    @GetMapping("/api/bunny/zones")
+    @ResponseBody
+    public Map<String, Object> getBunnyZones() {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("keys", bunnyAssetService.getZoneKeys());
+        resp.put("summary", bunnyAssetService.describeZones());
+        resp.put("enabled", bunnyAssetService.getZoneKeys().size() > 0);
+        return resp;
+    }
+
+    /**
      * Polled by the batch UI when auto-propagation to project-b is
      * enabled. Returns the live status of a {@link PropagationJob}
      * (status / progress / step / appendedEntries / errors). When
@@ -638,12 +669,30 @@ public class ScraperController {
     }
 
     /** Request body for {@code POST /api/video/pipeline/batch}. */
-    public record BatchPipelineRequest(List<String> urls, Boolean useMinimax, Boolean skipLlm) {}
+    public record BatchPipelineRequest(
+            List<String> urls,
+            Boolean useMinimax,
+            Boolean skipLlm,
+            /**
+             * Optional per-batch override for the Bunny.net zones to
+             * upload to. {@code null} → upload to every configured zone
+             * (default). The UI sends this so the user can pick
+             * "spankycouples only", "youjav only", or "both" from the
+             * batch form's CDN checkboxes.
+             */
+            java.util.Set<String> bunnyZones) {}
 
     /**
      * Multipart upload → enrich. The uploaded file is streamed to a temp
      * path via {@code transferTo} (no {@code getBytes()}) so 2 GB
      * uploads don't OOM.
+     *
+     * <p>The optional {@code bunnyZones} form param is a comma-separated
+     * list of Bunny.net pull zone keys to upload to (e.g.
+     * {@code "spankycouples,youjav"}). Omit it to upload to every
+     * configured zone — matches the legacy single-CDN behaviour. The
+     * frontend's CDN checkboxes build this CSV from the checked
+     * boxes; the server splits and validates each key.
      */
     @PostMapping(value = "/api/video/ingest-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseBody
@@ -654,7 +703,8 @@ public class ScraperController {
             @RequestParam(value = "category", required = false) String category,
             @RequestParam(value = "tags", required = false) String tags,
             @RequestParam(value = "unknownActressName", required = false) String unknownActressName,
-            @RequestParam(value = "actressId", required = false) String actressId) throws IOException {
+            @RequestParam(value = "actressId", required = false) String actressId,
+            @RequestParam(value = "bunnyZones", required = false) String bunnyZonesCsv) throws IOException {
 
         Path tmp = Files.createTempFile("scraper-enrich-upload-", ".bin");
         try {
@@ -663,7 +713,10 @@ public class ScraperController {
                     title, description, category,
                     VideoEnrichmentService.parseTagsCsv(tags),
                     unknownActressName, actressId, null);
-            return videoEnrichmentService.enrich(new EnrichmentSource.LocalFile(tmp, videoFile.getSize()), meta, false);
+            return videoEnrichmentService.enrich(
+                    new EnrichmentSource.LocalFile(tmp, videoFile.getSize()),
+                    meta, false, false, null, null,
+                    parseBunnyZonesCsv(bunnyZonesCsv));
         } catch (IOException | RuntimeException e) {
             try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
             throw e;
@@ -678,6 +731,11 @@ public class ScraperController {
      * remote URL (exactly one of the two is required). Streams the
      * uploaded file to a temp path, downloads the URL to a temp path,
      * and runs the full enrich pipeline.
+     *
+     * <p>The optional {@code bunnyZones} form param is a comma-separated
+     * list of Bunny.net pull zone keys to upload to. Omit it to upload
+     * to every configured zone — matches the legacy single-CDN
+     * behaviour.
      */
     @PostMapping(value = "/api/video/enrich", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseBody
@@ -689,7 +747,8 @@ public class ScraperController {
             @RequestParam(value = "unknownActressName", required = false) String unknownActressName,
             @RequestParam(value = "actressId", required = false) String actressId,
             @RequestPart(value = "videoFile", required = false) MultipartFile videoFile,
-            @RequestParam(value = "videoUrl", required = false) String videoUrl) throws IOException {
+            @RequestParam(value = "videoUrl", required = false) String videoUrl,
+            @RequestParam(value = "bunnyZones", required = false) String bunnyZonesCsv) throws IOException {
 
         if (title == null || title.isBlank()) {
             throw new IllegalArgumentException("title is required");
@@ -716,7 +775,8 @@ public class ScraperController {
                     title, description, category,
                     VideoEnrichmentService.parseTagsCsv(tags),
                     unknownActressName, actressId, null);
-            return videoEnrichmentService.enrich(source, meta, false);
+            return videoEnrichmentService.enrich(source, meta, false, false, null, null,
+                    parseBunnyZonesCsv(bunnyZonesCsv));
         } catch (IOException | RuntimeException e) {
             // If we managed to create a caller-side temp file (the upload case) and
             // the orchestrator never got to clean it up, remove it now.
@@ -725,5 +785,23 @@ public class ScraperController {
             }
             throw e;
         }
+    }
+
+    /**
+     * Split a comma-separated list of Bunny zone keys into a
+     * de-duplicated {@link java.util.LinkedHashSet} preserving the
+     * caller's order. Returns {@code null} for blank input — the
+     * orchestrator treats {@code null} as "upload to every configured
+     * zone". Each key is trimmed and case-preserved (the server's
+     * zone-key lookup is case-sensitive).
+     */
+    private static java.util.Set<String> parseBunnyZonesCsv(String csv) {
+        if (csv == null || csv.isBlank()) return null;
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        for (String token : csv.split(",")) {
+            String t = token.trim();
+            if (!t.isEmpty()) out.add(t);
+        }
+        return out.isEmpty() ? null : out;
     }
 }

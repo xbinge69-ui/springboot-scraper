@@ -1,5 +1,8 @@
 package com.example.scraper.model;
 
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 public class PipelineRequest {
 
     private String sourcePageUrl;
@@ -27,6 +30,19 @@ public class PipelineRequest {
      * and doesn't want a 2-10s LLM call per video.
      */
     private Boolean skipLlm;
+    /**
+     * Subset of Bunny.net pull zones to upload this video to. Keys
+     * must match an entry configured under {@code app.bunny.zones[i].key}
+     * or the legacy {@code app.bunny.storage.zone-name} on the server.
+     *
+     * <p>{@code null} (the default) means "upload to every configured
+     * zone" — matches the legacy single-zone behaviour and the
+     * "upload to both by default" intent of the batch UI.
+     *
+     * <p>An empty set is rejected by the server with HTTP 400 — it
+     * would result in no CDN copy at all.
+     */
+    private Set<String> bunnyZones;
 
     public String getSourcePageUrl() { return sourcePageUrl; }
     public void setSourcePageUrl(String sourcePageUrl) { this.sourcePageUrl = sourcePageUrl; }
@@ -60,5 +76,15 @@ public class PipelineRequest {
 
     public Boolean getSkipLlm() { return skipLlm; }
     public void setSkipLlm(Boolean skipLlm) { this.skipLlm = skipLlm; }
+
+    public Set<String> getBunnyZones() {
+        if (bunnyZones == null) return null;
+        // Return a stable, de-duplicated view so callers iterating this
+        // get canonical order (LinkedHashSet keeps insertion order).
+        return new LinkedHashSet<>(bunnyZones);
+    }
+    public void setBunnyZones(Set<String> bunnyZones) {
+        this.bunnyZones = (bunnyZones == null) ? null : new LinkedHashSet<>(bunnyZones);
+    }
 }
 

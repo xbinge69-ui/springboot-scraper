@@ -38,6 +38,19 @@ public class VideoCatalogEntry {
      * much each entry was compressed. Null for legacy entries.
      */
     private PipelineStats stats;
+    /**
+     * Bunny.net pull zones this entry was uploaded to. Order matches
+     * server configuration (primary first). Downstream consumers
+     * (project-b / the public site) read this to decide which CDN to
+     * play from and which to use as failover — the canonical
+     * {@link #embedUrl} is always the primary zone's URL, and
+     * {@link #backupEmbedUrl} is the secondary zone's URL when more
+     * than one zone was selected.
+     *
+     * <p>Null for legacy entries uploaded before multi-zone support
+     * existed (single zone implied).
+     */
+    private List<String> cdnZoneKeys;
 
     public VideoCatalogEntry() {
     }
@@ -92,4 +105,11 @@ public class VideoCatalogEntry {
 
     public PipelineStats getStats() { return stats; }
     public void setStats(PipelineStats stats) { this.stats = stats; }
+
+    public List<String> getCdnZoneKeys() { return cdnZoneKeys; }
+    public void setCdnZoneKeys(List<String> cdnZoneKeys) {
+        // Defensive copy so callers can mutate their input without
+        // aliasing the catalog entry's internal list.
+        this.cdnZoneKeys = (cdnZoneKeys == null) ? null : new ArrayList<>(cdnZoneKeys);
+    }
 }
